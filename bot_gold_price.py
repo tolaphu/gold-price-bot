@@ -7,15 +7,17 @@ Chạy trên GitHub Actions, gửi thông báo qua Telegram.
 """
 
 import os
-import requests
-import pandas as pd
 from datetime import datetime, timedelta
-from typing import Dict, Any
+from typing import Any, Dict, Iterable, List
+
+import pandas as pd
+import requests
 
 
 # ==========================
-# 1. HÀM LẤY GIÁ TỪ CÁC WEBSITE
+# 1. HÀM LẤY GIÁ PNJ, DOJI, SJC
 # ==========================
+
 
 def get_pnj_prices() -> Dict[str, Any]:
     """
@@ -28,37 +30,32 @@ def get_pnj_prices() -> Dict[str, Any]:
     if not tables:
         raise RuntimeError("PNJ: Không tìm thấy bảng dữ liệu nào")
 
-    # Thường bảng đầu là bảng giá chính
     df = tables[0]
     df.columns = [str(c).strip() for c in df.columns]
 
-    # Thử đoán tên cột (tùy trang, có thể thay đổi)
-    # Ví dụ: "Khu vực", "Loại vàng", "Giá mua", "Giá bán"
-    col_map = {}
-    for c in df.columns:
-        cl = c.lower()
-        if "khu" in cl and "vực" in cl:
-            col_map["khu_vuc"] = c
-        elif ("loại" in cl and "vàng" in cl) or "sản phẩm" in cl:
-            col_map["loai"] = c
-        elif "mua" in cl:
-            col_map["mua"] = c
-        elif "bán" in cl:
-            col_map["ban"] = c
+    col_map: Dict[str, str] = {}
+    for col in df.columns:
+        lower = str(col).lower()
+        if "khu" in lower and "vực" in lower:
+            col_map["khu_vuc"] = col
+        elif ("loại" in lower and "vàng" in lower) or "sản phẩm" in lower:
+            col_map["loai"] = col
+        elif "mua" in lower:
+            col_map["mua"] = col
+        elif "bán" in lower:
+            col_map["ban"] = col
 
     required = ["khu_vuc", "loai", "mua", "ban"]
-    if not all(k in col_map for k in required):
-        raise RuntimeError(f"PNJ: Không nhận diện được đủ cột, columns={df.columns}")
+    if not all(key in col_map for key in required):
+        raise RuntimeError(
+            f"PNJ: Không nhận diện được đủ cột, columns={df.columns}"
+        )
 
     result: Dict[str, Any] = {}
-
-    # Bạn có thể lọc theo khu vực, ví dụ chỉ TP.HCM
-    # Ở đây mình giữ nguyên tất cả khu vực
     for _, row in df.iterrows():
         loai = str(row[col_map["loai"]]).strip()
         if not loai or loai.lower() == "nan":
             continue
-
         result[loai] = {
             "mua": str(row[col_map["mua"]]).strip(),
             "ban": str(row[col_map["ban"]]).strip(),
@@ -80,37 +77,89 @@ def get_doji_prices() -> Dict[str, Any]:
     if not tables:
         raise RuntimeError("DOJI: Không tìm thấy bảng dữ liệu nào")
 
-    df = tables[0]  # Bảng đầu: Bảng giá tại Hà Nội (thường là vậy)
+    df = tables[0]
     df.columns = [str(c).strip() for c in df.columns]
 
-    # Thử map cột: "Loại", "Mua vào", "Bán ra"
-    col_map = {}
-    for c in df.columns:
-        cl = c.lower()
-        if "loại" in cl:
-            col_map["loai"] = c
-        elif "mua" in cl:
-            col_map["mua"] = c
-        elif "bán" in cl:
-            col_map["ban"] = c
+    col_map: Dict[str, str] = {}
+    for col in df.columns:
+        lower = str(col).lower()
+        if "loại" in lower:
+            col_map["loai"] = col
+        elif "mua" in lower:
+            col_map["mua"] = col
+        elif "bán" in lower:
+            col_map["ban"] = col
 
     required = ["loai", "mua", "ban"]
-    if not all(k in col_map for k in required):
-        raise RuntimeError(f"DOJI: Không nhận diện được đủ cột, columns={df.columns}")
+    if not all(key in col_map for key in required):
+        raise RuntimeError(
+            f"DOJI: Không nhận diện được đủ cột, columns={df.columns}"
+        )
 
     result: Dict[str, Any] = {}
-
     for _, row in df.iterrows():
         loai = str(row[col_map["loai"]]).strip()
         if not loai or loai.lower() == "nan":
             continue
-
         result[loai] = {
             "mua": str(row[col_map["mua"]]).strip(),
             "ban": str(row[col_map["ban"]]).strip(),
             "khu_vuc": "Hà Nội",
         }
 
+    return result
+
+
+def _find_sjc_dataframe(tables: Iterable[pd.DataFrame]) -> pd.DataFrame:
+    """
+    Tìm DataFrame chứa bảng 'Loại vàng / Mua vào / Bán ra' trong sjc.com.vn
+    """
+    for df in tables:
+        cols = [str(c).lower() for c in df.columns]
+        joined = " ".join(cols)
+        has_loai = "loại vàng" in joined or "loại" in joined
+        has_mua_ban = "mua" in joined and "bán" in joined
+        if has_loai and has_mua_ban:
+            return df
+
+    raise RuntimeError("SJC: Không tìm được bảng giá phù hợp")
+
+
+def _map_sjc_columns(df: pd.DataFrame) -> Dict[str, str]:
+    """
+    Map tên cột trong bảng SJC sang chuẩn: loai, mua, ban.
+    """
+    col_map: Dict[str, str] = {}
+    for col in df.columns:
+        lower = str(col).lower()
+        if "loại" in lower:
+            col_map["loai"] = col
+        elif "mua" in lower:
+            col_map["mua"] = col
+        elif "bán" in lower:
+            col_map["ban"] = col
+
+    required = ["loai", "mua", "ban"]
+    if not all(key in col_map for key in required):
+        raise RuntimeError(
+            f"SJC: Không nhận diện được đủ cột, columns={df.columns}"
+        )
+    return col_map
+
+
+def _sjc_rows_to_dict(df: pd.DataFrame, col_map: Dict[str, str]) -> Dict[str, Any]:
+    """
+    Chuyển từng dòng trong bảng SJC thành dict.
+    """
+    result: Dict[str, Any] = {}
+    for _, row in df.iterrows():
+        loai = str(row[col_map["loai"]]).strip()
+        if not loai or loai.lower() == "nan":
+            continue
+        result[loai] = {
+            "mua": str(row[col_map["mua"]]).strip(),
+            "ban": str(row[col_map["ban"]]).strip(),
+        }
     return result
 
 
@@ -125,49 +174,11 @@ def get_sjc_prices() -> Dict[str, Any]:
     if not tables:
         raise RuntimeError("SJC: Không tìm thấy bảng dữ liệu nào")
 
-    df_target = None
-    for df in tables:
-        cols = [str(c).lower() for c in df.columns]
-        joined = " ".join(cols)
-        # Thường bảng giá SJC có các cột chứa "loại vàng", "mua vào", "bán ra"
-        if ("loại vàng" in joined or "loại" in joined) and ("mua" in joined and "bán" in joined):
-            df_target = df
-            break
+    df_raw = _find_sjc_dataframe(tables)
+    df_raw.columns = [str(c).strip() for c in df_raw.columns]
 
-    if df_target is None:
-        raise RuntimeError("SJC: Không tìm được bảng giá phù hợp")
-
-    df = df_target
-    df.columns = [str(c).strip() for c in df.columns]
-
-    # Map cột
-    col_map = {}
-    for c in df.columns:
-        cl = c.lower()
-        if "loại" in cl:
-            col_map["loai"] = c
-        elif "mua" in cl:
-            col_map["mua"] = c
-        elif "bán" in cl:
-            col_map["ban"] = c
-
-    required = ["loai", "mua", "ban"]
-    if not all(k in col_map for k in required):
-        raise RuntimeError(f"SJC: Không nhận diện được đủ cột, columns={df.columns}")
-
-    result: Dict[str, Any] = {}
-
-    for _, row in df.iterrows():
-        loai = str(row[col_map["loai"]]).strip()
-        if not loai or loai.lower() == "nan":
-            continue
-
-        result[loai] = {
-            "mua": str(row[col_map["mua"]]).strip(),
-            "ban": str(row[col_map["ban"]]).strip(),
-        }
-
-    return result
+    col_map = _map_sjc_columns(df_raw)
+    return _sjc_rows_to_dict(df_raw, col_map)
 
 
 def get_all_gold_prices() -> Dict[str, Any]:
@@ -175,22 +186,22 @@ def get_all_gold_prices() -> Dict[str, Any]:
     Gom dữ liệu từ PNJ, DOJI, SJC.
     """
     data: Dict[str, Any] = {}
-    errors = []
+    errors: List[str] = []
 
     try:
         data["PNJ"] = get_pnj_prices()
-    except Exception as e:
-        errors.append(f"PNJ: {e}")
+    except Exception as exc:
+        errors.append(f"PNJ: {exc}")
 
     try:
         data["DOJI"] = get_doji_prices()
-    except Exception as e:
-        errors.append(f"DOJI: {e}")
+    except Exception as exc:
+        errors.append(f"DOJI: {exc}")
 
     try:
         data["SJC"] = get_sjc_prices()
-    except Exception as e:
-        errors.append(f"SJC: {e}")
+    except Exception as exc:
+        errors.append(f"SJC: {exc}")
 
     if errors:
         data["_errors"] = errors
@@ -202,70 +213,115 @@ def get_all_gold_prices() -> Dict[str, Any]:
 # 2. FORMAT NỘI DUNG TIN NHẮN
 # ==========================
 
-def format_gold_message(data: Dict[str, Any]) -> str:
+
+def _format_header() -> List[str]:
     """
-    Format text gọn gàng để gửi Telegram.
+    Tạo phần header chung của message.
     """
-    # Thời gian VN (UTC+7)
     now_utc = datetime.utcnow()
     now_vn = now_utc + timedelta(hours=7)
     header_time = now_vn.strftime("%d/%m/%Y %H:%M")
 
-    lines = []
-    lines.append(f"📊 Báo cáo giá vàng VN (PNJ – DOJI – SJC)")
+    lines: List[str] = []
+    lines.append("📊 Báo cáo giá vàng VN (PNJ – DOJI – SJC)")
     lines.append(f"⏰ Cập nhật: {header_time} (giờ VN)")
     lines.append("")
+    return lines
 
-    # PNJ
-    if "PNJ" in data:
-        lines.append("🟡 PNJ")
-        if data["PNJ"]:
-            for loai, info in data["PNJ"].items():
-                khu_vuc = info.get("khu_vuc", "")
-                kv = f" [{khu_vuc}]" if khu_vuc else ""
-                lines.append(
-                    f"- {loai}{kv}: Mua {info['mua']} | Bán {info['ban']}"
-                )
-        else:
-            lines.append("- Không có dữ liệu.")
+
+def _append_pnj_section(lines: List[str], pnj_data: Dict[str, Any] | None) -> None:
+    """
+    Thêm section PNJ vào message.
+    """
+    if pnj_data is None:
+        return
+
+    lines.append("🟡 PNJ")
+    if not pnj_data:
+        lines.append("- Không có dữ liệu.")
         lines.append("")
+        return
 
-    # DOJI
-    if "DOJI" in data:
-        lines.append("🟠 DOJI (Hà Nội)")
-        if data["DOJI"]:
-            for loai, info in data["DOJI"].items():
-                lines.append(
-                    f"- {loai}: Mua {info['mua']} | Bán {info['ban']}"
-                )
-        else:
-            lines.append("- Không có dữ liệu.")
+    for loai, info in pnj_data.items():
+        khu_vuc = info.get("khu_vuc") or ""
+        suffix = f" [{khu_vuc}]" if khu_vuc else ""
+        mua = info.get("mua", "")
+        ban = info.get("ban", "")
+        lines.append(f"- {loai}{suffix}: Mua {mua} | Bán {ban}")
+
+    lines.append("")
+
+
+def _append_doji_section(lines: List[str], doji_data: Dict[str, Any] | None) -> None:
+    """
+    Thêm section DOJI vào message.
+    """
+    if doji_data is None:
+        return
+
+    lines.append("🟠 DOJI (Hà Nội)")
+    if not doji_data:
+        lines.append("- Không có dữ liệu.")
         lines.append("")
+        return
 
-    # SJC
-    if "SJC" in data:
-        lines.append("🔵 SJC")
-        if data["SJC"]:
-            for loai, info in data["SJC"].items():
-                lines.append(
-                    f"- {loai}: Mua {info['mua']} | Bán {info['ban']}"
-                )
-        else:
-            lines.append("- Không có dữ liệu.")
+    for loai, info in doji_data.items():
+        mua = info.get("mua", "")
+        ban = info.get("ban", "")
+        lines.append(f"- {loai}: Mua {mua} | Bán {ban}")
+
+    lines.append("")
+
+
+def _append_sjc_section(lines: List[str], sjc_data: Dict[str, Any] | None) -> None:
+    """
+    Thêm section SJC vào message.
+    """
+    if sjc_data is None:
+        return
+
+    lines.append("🔵 SJC")
+    if not sjc_data:
+        lines.append("- Không có dữ liệu.")
         lines.append("")
+        return
 
-    # Lỗi (nếu có)
-    if "_errors" in data and data["_errors"]:
-        lines.append("⚠️ Lỗi trong quá trình lấy dữ liệu:")
-        for err in data["_errors"]:
-            lines.append(f"- {err}")
+    for loai, info in sjc_data.items():
+        mua = info.get("mua", "")
+        ban = info.get("ban", "")
+        lines.append(f"- {loai}: Mua {mua} | Bán {ban}")
 
+    lines.append("")
+
+
+def _append_error_section(lines: List[str], errors: List[str] | None) -> None:
+    """
+    Thêm phần lỗi (nếu có) vào message.
+    """
+    if not errors:
+        return
+
+    lines.append("⚠️ Lỗi trong quá trình lấy dữ liệu:")
+    for err in errors:
+        lines.append(f"- {err}")
+
+
+def format_gold_message(data: Dict[str, Any]) -> str:
+    """
+    Format text gọn gàng để gửi Telegram.
+    """
+    lines = _format_header()
+    _append_pnj_section(lines, data.get("PNJ"))
+    _append_doji_section(lines, data.get("DOJI"))
+    _append_sjc_section(lines, data.get("SJC"))
+    _append_error_section(lines, data.get("_errors"))
     return "\n".join(lines)
 
 
 # ==========================
 # 3. GỬI TELEGRAM
 # ==========================
+
 
 def send_telegram_message(text: str) -> None:
     """
@@ -283,27 +339,26 @@ def send_telegram_message(text: str) -> None:
         raise RuntimeError("Thiếu TELEGRAM_CHAT_ID (env)")
 
     url = f"https://api.telegram.org/bot{token}/sendMessage"
-    payload = {
-        "chat_id": chat_id,
-        "text": text,
-    }
+    payload = {"chat_id": chat_id, "text": text}
 
     resp = requests.post(url, json=payload, timeout=30)
     if not resp.ok:
-        raise RuntimeError(f"Telegram API lỗi: {resp.status_code} {resp.text}")
+        raise RuntimeError(
+            f"Telegram API lỗi: {resp.status_code} {resp.text}"
+        )
 
 
 # ==========================
 # 4. MAIN
 # ==========================
 
+
 def main() -> None:
     try:
         data = get_all_gold_prices()
         message = format_gold_message(data)
-    except Exception as e:
-        # Nếu lỗi nặng (không lấy được data), vẫn gửi báo lỗi
-        message = f"⚠️ Gold Bot: lỗi khi lấy dữ liệu – {e}"
+    except Exception as exc:
+        message = f"⚠️ Gold Bot: lỗi khi lấy dữ liệu – {exc}"
 
     send_telegram_message(message)
 
