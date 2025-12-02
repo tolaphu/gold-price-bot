@@ -2,10 +2,9 @@ name: Gold Price Bot
 
 on:
   schedule:
-    # Cron dùng giờ UTC
-    # Ví dụ: 0 2 * * * = 09:00 sáng giờ Việt Nam (UTC+7)
-    - cron: "0 2 * * *"
-  workflow_dispatch:  # Cho phép bấm "Run workflow" để test thủ công
+    - cron: "0 2 * * *" # 09:00 sáng VN
+  workflow_dispatch:
+
 jobs:
   run-bot:
     runs-on: ubuntu-latest
@@ -17,13 +16,24 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: "3.10" # Dùng 3.10 hoặc 3.11 đều ổn
 
       - name: Install dependencies
         run: |
+          pip install --upgrade pip
           pip install -r requirements.txt
+          # Cài thêm html5lib explicit để tránh lỗi PNJ
+          pip install html5lib 
 
-      - name: Run gold bot
+      - name: Run Tests (Mocked)
+        # Set PYTHONPATH để pytest tìm thấy file bot_gold_price.py ở root
+        env:
+          PYTHONPATH: . 
+        run: |
+          pytest tests/test_smoke.py
+
+      - name: Run gold bot (Production)
+        # Chỉ chạy bước này nếu không phải là test hoặc bạn muốn chạy thật
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
