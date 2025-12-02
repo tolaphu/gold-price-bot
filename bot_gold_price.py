@@ -65,52 +65,49 @@ def get_pnj_prices() -> Dict[str, Any]:
     return result
 
 
+# SỬA LẠI HÀM get_doji_prices
 def get_doji_prices() -> Dict[str, Any]:
-    """
-    Lấy bảng giá vàng từ DOJI.
-    Mặc định lấy bảng đầu tiên (thường là giá vàng trong nước).
-    Trả về dict: { 'Tên loại': {mua, ban, khu_vuc} }
-    """
     url = "https://giavang.doji.vn/"
-    tables = pd.read_html(url)
+    try:
+        # Thêm flavor='html5lib' hoặc 'lxml' để parse tốt hơn
+        tables = pd.read_html(url, flavor=['lxml', 'html5lib'])
+    except Exception as e:
+        raise RuntimeError(f"DOJI: Lỗi read_html - {e}")
 
     if not tables:
         raise RuntimeError("DOJI: Không tìm thấy bảng dữ liệu nào")
 
-    df = tables[0]
-    df.columns = [str(c).strip() for c in df.columns]
+    # Duyệt qua TẤT CẢ các bảng để tìm bảng đúng
+    for df in tables:
+        df.columns = [str(c).strip() for c in df.columns]
+        col_map: Dict[str, str] = {}
+        
+        for col in df.columns:
+            lower = str(col).lower()
+            if "loại" in lower or "giá vàng trong nước" in lower:
+                col_map["loai"] = col
+            elif "mua" in lower:
+                col_map["mua"] = col
+            elif "bán" in lower:
+                col_map["ban"] = col
+        
+        # Nếu tìm đủ cột thì xử lý bảng này và return ngay
+        required = ["loai", "mua", "ban"]
+        if all(key in col_map for key in required):
+            result: Dict[str, Any] = {}
+            for _, row in df.iterrows():
+                loai = str(row[col_map["loai"]]).strip()
+                if not loai or loai.lower() == "nan":
+                    continue
+                result[loai] = {
+                    "mua": str(row[col_map["mua"]]).strip(),
+                    "ban": str(row[col_map["ban"]]).strip(),
+                    "khu_vuc": "Trong nước",
+                }
+            return result
 
-    col_map: Dict[str, str] = {}
-    for col in df.columns:
-        lower = str(col).lower()
-        # Cột "Giá vàng trong nước" coi như là cột loại
-        if "loại" in lower or "giá vàng trong nước" in lower:
-            col_map["loai"] = col
-        elif "mua" in lower:
-            col_map["mua"] = col
-        elif "bán" in lower:
-            col_map["ban"] = col
-
-    required = ["loai", "mua", "ban"]
-    if not all(key in col_map for key in required):
-        raise RuntimeError(
-            f"DOJI: Không nhận diện được đủ cột, columns={df.columns}"
-        )
-
-    result: Dict[str, Any] = {}
-    for _, row in df.iterrows():
-        loai = str(row[col_map["loai"]]).strip()
-        if not loai or loai.lower() == "nan":
-            continue
-
-        result[loai] = {
-            "mua": str(row[col_map["mua"]]).strip(),
-            "ban": str(row[col_map["ban"]]).strip(),
-            # Nếu sau này anh muốn tách khu vực (HN, HCM, Đà Nẵng...) thì chỉnh thêm ở đây
-            "khu_vuc": "Trong nước",
-        }
-
-    return result
+    # Nếu chạy hết vòng lặp mà không return
+    raise RuntimeError(f"DOJI: Đã duyệt {len(tables)} bảng nhưng không khớp cột.")
 
 
 
@@ -168,39 +165,35 @@ def _sjc_rows_to_dict(df: pd.DataFrame, col_map: Dict[str, str]) -> Dict[str, An
 
 
 def get_sjc_prices() -> Dict[str, Any]:
-    """
-    Lấy bảng giá vàng SJC từ website sjc.com.vn.
-    Trả về dict: { 'Loại vàng': {mua, ban} }
-    """
     url = "https://sjc.com.vn/giavang/textContent.jsp"
+    # SJC chặn bot rất gắt, cần giả lập Header giống hệt trình duyệt
     headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/120.0 Safari/537.36"
-        ),
-        "Accept-Language": "vi-VN,vi;q=0.9,en-US;q=0.8,en;q=0.7",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        "Referer": "https://sjc.com.vn/",
     }
 
     last_exc: Exception | None = None
-    for _ in range(3):  # thử tối đa 3 lần
+    for _ in range(3): 
         try:
-            resp = requests.get(url, headers=headers, timeout=20)
+            resp = requests.get(url, headers=headers, timeout=30)
             resp.raise_for_status()
+            # Xử lý encoding nếu SJC trả về lỗi font
+            resp.encoding = resp.apparent_encoding 
             tables = pd.read_html(resp.text)
             break
         except Exception as exc:
             last_exc = exc
             tables = None
+            import time
+            time.sleep(2) # Nghỉ 2s trước khi thử lại
 
     if not tables:
-        raise RuntimeError(
-            f"SJC: lỗi kết nối hoặc không tìm thấy bảng dữ liệu – {last_exc}"
-        )
+        raise RuntimeError(f"SJC: Lỗi kết nối - {last_exc}")
 
     df_raw = _find_sjc_dataframe(tables)
+    # ... (phần còn lại giữ nguyên)
     df_raw.columns = [str(c).strip() for c in df_raw.columns]
-
     col_map = _map_sjc_columns(df_raw)
     return _sjc_rows_to_dict(df_raw, col_map)
 
