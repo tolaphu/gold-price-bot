@@ -68,7 +68,7 @@ def get_pnj_prices() -> Dict[str, Any]:
 def get_doji_prices() -> Dict[str, Any]:
     """
     Lấy bảng giá vàng từ DOJI.
-    Mặc định lấy bảng đầu tiên (thường là Hà Nội).
+    Mặc định lấy bảng đầu tiên (thường là giá vàng trong nước).
     Trả về dict: { 'Tên loại': {mua, ban, khu_vuc} }
     """
     url = "https://giavang.doji.vn/"
@@ -83,7 +83,8 @@ def get_doji_prices() -> Dict[str, Any]:
     col_map: Dict[str, str] = {}
     for col in df.columns:
         lower = str(col).lower()
-        if "loại" in lower:
+        # Cột "Giá vàng trong nước" coi như là cột loại
+        if "loại" in lower or "giá vàng trong nước" in lower:
             col_map["loai"] = col
         elif "mua" in lower:
             col_map["mua"] = col
@@ -101,13 +102,16 @@ def get_doji_prices() -> Dict[str, Any]:
         loai = str(row[col_map["loai"]]).strip()
         if not loai or loai.lower() == "nan":
             continue
+
         result[loai] = {
             "mua": str(row[col_map["mua"]]).strip(),
             "ban": str(row[col_map["ban"]]).strip(),
-            "khu_vuc": "Hà Nội",
+            # Nếu sau này anh muốn tách khu vực (HN, HCM, Đà Nẵng...) thì chỉnh thêm ở đây
+            "khu_vuc": "Trong nước",
         }
 
     return result
+
 
 
 def _find_sjc_dataframe(tables: Iterable[pd.DataFrame]) -> pd.DataFrame:
@@ -168,11 +172,31 @@ def get_sjc_prices() -> Dict[str, Any]:
     Lấy bảng giá vàng SJC từ website sjc.com.vn.
     Trả về dict: { 'Loại vàng': {mua, ban} }
     """
-    url = "https://sjc.com.vn/"
-    tables = pd.read_html(url)
+    url = "https://sjc.com.vn/giavang/textContent.jsp"
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/120.0 Safari/537.36"
+        ),
+        "Accept-Language": "vi-VN,vi;q=0.9,en-US;q=0.8,en;q=0.7",
+    }
+
+    last_exc: Exception | None = None
+    for _ in range(3):  # thử tối đa 3 lần
+        try:
+            resp = requests.get(url, headers=headers, timeout=20)
+            resp.raise_for_status()
+            tables = pd.read_html(resp.text)
+            break
+        except Exception as exc:
+            last_exc = exc
+            tables = None
 
     if not tables:
-        raise RuntimeError("SJC: Không tìm thấy bảng dữ liệu nào")
+        raise RuntimeError(
+            f"SJC: lỗi kết nối hoặc không tìm thấy bảng dữ liệu – {last_exc}"
+        )
 
     df_raw = _find_sjc_dataframe(tables)
     df_raw.columns = [str(c).strip() for c in df_raw.columns]
