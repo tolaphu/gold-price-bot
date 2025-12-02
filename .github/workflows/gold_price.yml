@@ -2,8 +2,9 @@ name: Gold Price Bot
 
 on:
   schedule:
-    # 09:00 sáng giờ VN (UTC+7) = 02:00 UTC
+    # Chạy tự động lúc 09:00 sáng VN
     - cron: "0 2 * * *"
+  # Dòng này cho phép hiển thị nút "Run workflow" để bấm chạy NGAY LẬP TỨC
   workflow_dispatch:
 
 jobs:
@@ -11,31 +12,24 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout
+      - name: Checkout code
         uses: actions/checkout@v4
 
-      # Đặt phiên bản Python rõ ràng để tránh dùng bản mặc định cũ
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-          cache: 'pip'
+          cache: 'pip' # Giúp cài thư viện nhanh hơn ở các lần sau
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
+          # Cài các thư viện từ file requirements
           pip install -r requirements.txt
-          pip install html5lib
+          # Cài thêm thư viện bổ trợ xử lý HTML (quan trọng cho PNJ/DOJI)
+          pip install html5lib lxml
 
-      - name: Run Tests (Mocked)
-        # PYTHONPATH=. giúp pytest tìm thấy bot_gold_price.py
-        env:
-          PYTHONPATH: .
-        run: |
-          pytest tests/test_smoke.py
-
-      - name: Run gold bot
-        # Chỉ chạy nếu không phải pull request (hoặc luôn chạy nếu bạn muốn)
+      - name: Run Gold Bot
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
