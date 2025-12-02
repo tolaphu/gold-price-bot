@@ -2,7 +2,8 @@ name: Gold Price Bot
 
 on:
   schedule:
-    - cron: "0 2 * * *" # 09:00 sáng VN
+    # 09:00 sáng giờ VN (UTC+7) = 02:00 UTC
+    - cron: "0 2 * * *"
   workflow_dispatch:
 
 jobs:
@@ -13,27 +14,28 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # Đặt phiên bản Python rõ ràng để tránh dùng bản mặc định cũ
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.10" # Dùng 3.10 hoặc 3.11 đều ổn
+          python-version: "3.11"
+          cache: 'pip'
 
       - name: Install dependencies
         run: |
-          pip install --upgrade pip
+          python -m pip install --upgrade pip
           pip install -r requirements.txt
-          # Cài thêm html5lib explicit để tránh lỗi PNJ
-          pip install html5lib 
+          pip install html5lib
 
       - name: Run Tests (Mocked)
-        # Set PYTHONPATH để pytest tìm thấy file bot_gold_price.py ở root
+        # PYTHONPATH=. giúp pytest tìm thấy bot_gold_price.py
         env:
-          PYTHONPATH: . 
+          PYTHONPATH: .
         run: |
           pytest tests/test_smoke.py
 
-      - name: Run gold bot (Production)
-        # Chỉ chạy bước này nếu không phải là test hoặc bạn muốn chạy thật
+      - name: Run gold bot
+        # Chỉ chạy nếu không phải pull request (hoặc luôn chạy nếu bạn muốn)
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
