@@ -14,6 +14,9 @@ from typing import Any, Dict, Iterable, List, Optional
 
 import pandas as pd
 import requests
+import json
+
+HISTORY_FILE = "gold_history.json"
 
 def _normalize_price_to_vnd(value: Any) -> Optional[int]:
     """
@@ -50,6 +53,85 @@ def _format_vnd_amount(value: Any) -> str:
         return ""
     # Format kiểu 15.280.000 VNĐ
     return f"{amount:,}".replace(",", ".") + " VNĐ"
+
+def _find_item_price(
+    data: Dict[str, Any],
+    brand_key: str,
+    name_contains: str,
+    field: str = "ban",
+) -> Optional[int]:
+    """
+    Tìm giá (mua/bán) của 1 sản phẩm trong 1 thương hiệu, trả về VNĐ (int).
+    brand_key: 'PNJ', 'DOJI', 'SJC'
+    name_contains: chuỗi con để match tên sản phẩm (không phân biệt hoa/thường)
+    field: 'mua' hoặc 'ban'
+    """
+    brand_data = data.get(brand_key) or {}
+    for loai, info in brand_data.items():
+        if name_contains.lower() in str(loai).lower():
+            return _normalize_price_to_vnd(info.get(field))
+    return None
+
+def _load_history() -> Dict[str, Any]:
+    try:
+        with open(HISTORY_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except FileNotFoundError:
+        return {}
+    except Exception as exc:
+        print(f"Không đọc được history: {exc}")
+        return {}
+
+
+def _build_history_snapshot(data: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Lưu lại một số giá 'key' để so sánh ở lần sau.
+    Lưu giá bán (ban) dưới dạng VNĐ (int).
+    """
+    snapshot: Dict[str, Any] = {
+        "_timestamp_utc": datetime.utcnow().isoformat(),
+        "PNJ_HCM_BAN": _find_item_price(data, "PNJ", "PNJ HCM", "ban"),
+        "DOJI_AVPL_BAN": _find_item_price(data, "DOJI", "AVPL/SJC", "ban"),
+        "SJC_1L_BAN": _find_item_price(data, "SJC", "SJC 1L", "ban"),
+    }
+    return snapshot
+
+
+def _save_history(snapshot: Dict[str, Any]) -> None:
+    try:
+        with open(HISTORY_FILE, "w", encoding="utf-8") as f:
+            json.dump(snapshot, f, ensure_ascii=False, indent=2)
+    except Exception as exc:
+        print(f"Không lưu được history: {exc}")
+def _format_change(current: Optional[int], previous: Optional[int]) -> str:
+    """
+    current, previous: giá VNĐ (int)
+    Trả về câu kiểu: '▲ tăng 300.000 VNĐ (+0,20%)'
+    """
+    if current is None or previous is None or previous == 0:
+        return "không có dữ liệu so sánh"
+
+    diff = current - previous
+    if diff > 0:
+        direction = "tăng"
+        symbol = "▲"
+    elif diff < 0:
+        direction = "giảm"
+        symbol = "▼"
+    else:
+        direction = "đứng giá"
+        symbol = "▶"
+
+    diff_abs = abs(diff)
+    diff_str = f"{diff_abs:,}".replace(",", ".") + " VNĐ"
+
+    pct = (diff / previous) * 100
+    # hiển thị dấu +/-
+    pct_str = f"{pct:+.2f}%".replace(".", ",")
+
+    if diff == 0:
+        return f"{symbol} {direction} 0 VNĐ ({pct_str})"
+    return f"{symbol} {direction} {diff_str} ({pct_str})"
 
 # ==========================
 # 1. HÀM LẤY GIÁ PNJ, DOJI, SJC
@@ -308,9 +390,16 @@ def _append_doji_section(lines: List[str], doji_data: Optional[Dict[str, Any]]) 
         return
 
     for loai, info in doji_data.items():
+        # Làm sạch tên: bỏ '(nghìn/chỉ)' nếu có
+        name_display = (
+            loai.replace("(nghìn/chỉ)", "")
+                .replace("(nghìn/chỉ)", "")
+                .strip()
+        )
+
         mua = _format_vnd_amount(info.get("mua"))
         ban = _format_vnd_amount(info.get("ban"))
-        lines.append(f"- {loai}: Mua {mua} | Bán {ban}")
+        lines.append(f"- {name_display}: Mua {mua} | Bán {ban}")
 
     lines.append("")
 
@@ -327,9 +416,10 @@ def _append_sjc_section(lines: List[str], sjc_data: Optional[Dict[str, Any]]) ->
         return
 
     for loai, info in sjc_data.items():
+        name_display = loai.strip()
         mua = _format_vnd_amount(info.get("mua"))
         ban = _format_vnd_amount(info.get("ban"))
-        lines.append(f"- {loai}: Mua {mua} | Bán {ban}")
+        lines.append(f"- {name_display}: Mua {mua} | Bán {ban}")
 
     lines.append("")
 
@@ -344,13 +434,68 @@ def _append_error_section(lines: List[str], errors: Optional[List[str]]) -> None
         lines.append(f"- {err}")
 
 
-def format_gold_message(data: Dict[str, Any]) -> str:
+def format_gold_message(data: Dict[str, Any],
+                        history: Optional[Dict[str, Any]] = None) -> str:
     lines = _format_header()
+
+    # Thêm tóm tắt nhanh + diễn biến nếu có history
+    def _append_quick_summary(lines: List[str], data: Dict[str, Any]) -> None:
+    pnj_hcm = _find_item_price(data, "PNJ", "PNJ HCM", "ban")
+    doji_avpl = _find_item_price(data, "DOJI", "AVPL/SJC", "ban")
+    sjc_1l = _find_item_price(data, "SJC", "SJC 1L", "ban")
+
+    lines.append("📌 Tóm tắt nhanh – Giá bán")
+    if pnj_hcm is not None:
+        lines.append(f"- PNJ HCM: {_format_vnd_amount(pnj_hcm)}")
+    if doji_avpl is not None:
+        lines.append(f"- DOJI AVPL/SJC: {_format_vnd_amount(doji_avpl)}")
+    if sjc_1l is not None:
+        lines.append(f"- SJC 1L/10L/1KG: {_format_vnd_amount(sjc_1l)}")
+    lines.append("")
+
+
+def _append_change_section(lines: List[str],
+                           data: Dict[str, Any],
+                           history: Dict[str, Any]) -> None:
+    pnj_curr = _find_item_price(data, "PNJ", "PNJ HCM", "ban")
+    doji_curr = _find_item_price(data, "DOJI", "AVPL/SJC", "ban")
+    sjc_curr = _find_item_price(data, "SJC", "SJC 1L", "ban")
+
+    pnj_prev = history.get("PNJ_HCM_BAN")
+    doji_prev = history.get("DOJI_AVPL_BAN")
+    sjc_prev = history.get("SJC_1L_BAN")
+
+    lines.append("📈 Diễn biến so với lần cập nhật trước")
+
+    if not any([pnj_prev, doji_prev, sjc_prev]):
+        lines.append("- Chưa có dữ liệu so sánh (lần chạy đầu tiên).")
+        lines.append("")
+        return
+
+    if pnj_curr is not None:
+        lines.append(
+            f"- PNJ HCM (Bán): {_format_vnd_amount(pnj_curr)} – "
+            f"{_format_change(pnj_curr, pnj_prev)}"
+        )
+    if doji_curr is not None:
+        lines.append(
+            f"- DOJI AVPL/SJC (Bán): {_format_vnd_amount(doji_curr)} – "
+            f"{_format_change(doji_curr, doji_prev)}"
+        )
+    if sjc_curr is not None:
+        lines.append(
+            f"- SJC 1L/10L/1KG (Bán): {_format_vnd_amount(sjc_curr)} – "
+            f"{_format_change(sjc_curr, sjc_prev)}"
+        )
+
+    lines.append("")
+
     _append_pnj_section(lines, data.get("PNJ"))
     _append_doji_section(lines, data.get("DOJI"))
     _append_sjc_section(lines, data.get("SJC"))
     _append_error_section(lines, data.get("_errors"))
     return "\n".join(lines)
+
 
 
 # ==========================
@@ -383,12 +528,17 @@ def send_telegram_message(text: str) -> None:
 
 def main() -> None:
     try:
+        prev_history = _load_history()
         data = get_all_gold_prices()
-        message = format_gold_message(data)
+        message = format_gold_message(data, prev_history)
+        # Xây snapshot mới và lưu lại
+        new_history = _build_history_snapshot(data)
+        _save_history(new_history)
     except Exception as exc:
         message = f"⚠️ Gold Bot: lỗi nghiêm trọng – {exc}"
 
     send_telegram_message(message)
+
 
 
 if __name__ == "__main__":
