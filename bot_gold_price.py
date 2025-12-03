@@ -37,8 +37,6 @@ def _normalize_price_to_vnd(value: Any) -> Optional[int]:
 
     amount = int(digits)
 
-    # 15280 -> 5 chữ số -> 15.280.000 VNĐ
-    # 150600000 -> 9 chữ số -> 150.600.000 VNĐ (không nhân nữa)
     if len(digits) <= 6:
         amount *= 1000
 
@@ -46,9 +44,7 @@ def _normalize_price_to_vnd(value: Any) -> Optional[int]:
 
 
 def _format_vnd_raw(amount: int) -> str:
-    """
-    Định dạng số VNĐ (int) thành 'xx.xxx.xxx VNĐ' (không nhân thêm).
-    """
+    """Định dạng số VNĐ (int) thành 'xx.xxx.xxx VNĐ'."""
     return f"{amount:,}".replace(",", ".") + " VNĐ"
 
 
@@ -272,12 +268,7 @@ def _append_doji_section(lines: List[str], doji_data: Optional[Dict[str, Any]]) 
         return
 
     for loai, info in doji_data.items():
-        # Làm sạch tên: bỏ ' (nghìn/chỉ)' nếu có
-        name_display = (
-            loai.replace("(nghìn/chỉ)", "")
-            .replace("(nghìn/chỉ)", "")
-            .strip()
-        )
+        name_display = loai.replace("(nghìn/chỉ)", "").strip()
 
         mua = _format_vnd_amount(info.get("mua"))
         ban = _format_vnd_amount(info.get("ban"))
@@ -325,16 +316,69 @@ def _find_item_price(
     field: str = "ban",
 ) -> Optional[int]:
     """
-    Tìm giá (mua/bán) của 1 sản phẩm trong 1 thương hiệu, trả về VNĐ (int).
-    brand_key: 'PNJ', 'DOJI', 'SJC'
-    name_contains: chuỗi con để match tên sản phẩm (không phân biệt hoa/thường)
-    field: 'mua' hoặc 'ban'
+    Tìm giá (mua/bán) của 1 sản phẩm trong 1 thương hiệu, trả về VNĐ (int),
+    tìm theo 'chứa chuỗi' (case-insensitive).
     """
     brand_data = data.get(brand_key) or {}
     for loai, info in brand_data.items():
         if name_contains.lower() in str(loai).lower():
             return _normalize_price_to_vnd(info.get(field))
     return None
+
+
+def _choose_summary_item(
+    brand_key: str,
+    brand_data: Dict[str, Any],
+) -> Optional[Dict[str, Any]]:
+    """
+    Chọn 1 dòng đại diện cho mỗi thương hiệu để theo dõi lịch sử.
+    Trả về: {'name': <tên dòng>, 'ban': <giá bán VNĐ>}
+    """
+    if not brand_data:
+        return None
+
+    keys = list(brand_data.keys())
+    if not keys:
+        return None
+
+    # Heuristic riêng cho từng brand
+    chosen_name: Optional[str] = None
+
+    if brand_key == "PNJ":
+        # Ưu tiên dòng có HCM / TP.HCM
+        candidates = [
+            k for k in keys
+            if "hcm" in k.lower() or "tp.hcm" in k.lower() or "tp hcm" in k.lower()
+        ]
+        if not candidates:
+            candidates = [k for k in keys if "pnj" in k.lower()]
+        chosen_name = (candidates or keys)[0]
+
+    elif brand_key == "DOJI":
+        # Ưu tiên dòng có AVPL/SJC hoặc SJC
+        candidates = [
+            k for k in keys
+            if "avpl" in k.lower() or "sjc" in k.lower()
+        ]
+        chosen_name = (candidates or keys)[0]
+
+    elif brand_key == "SJC":
+        # Ưu tiên dòng có 1L, 10L, 1KG
+        candidates = [
+            k for k in keys
+            if "1l" in k.lower() or "1kg" in k.lower() or "10l" in k.lower()
+        ]
+        chosen_name = (candidates or keys)[0]
+
+    else:
+        chosen_name = keys[0]
+
+    ban_raw = brand_data[chosen_name].get("ban")
+    ban_vnd = _normalize_price_to_vnd(ban_raw)
+    if ban_vnd is None:
+        return None
+
+    return {"name": chosen_name, "ban": ban_vnd}
 
 
 def _load_history() -> Dict[str, Any]:
@@ -350,14 +394,28 @@ def _load_history() -> Dict[str, Any]:
 
 def _build_history_snapshot(data: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Lưu lại một số giá 'key' để so sánh ở lần sau.
-    Lưu giá BÁN ra (ban) dưới dạng VNĐ (int).
+    Lưu lại các dòng đại diện (giá BÁN ra) để so sánh ở lần sau.
+    Cấu trúc:
+    {
+      "_timestamp_utc": "...",
+      "summary_items": {
+        "PNJ": {"name": "...", "ban": 153600000},
+        "DOJI": {"name": "...", "ban": 154800000},
+        "SJC": {"name": "...", "ban": 154800000}
+      }
+    }
     """
+    summary_items: Dict[str, Any] = {}
+
+    for brand in ("PNJ", "DOJI", "SJC"):
+        brand_data = data.get(brand) or {}
+        chosen = _choose_summary_item(brand, brand_data)
+        if chosen:
+            summary_items[brand] = chosen
+
     snapshot: Dict[str, Any] = {
         "_timestamp_utc": datetime.utcnow().isoformat(),
-        "PNJ_HCM_BAN": _find_item_price(data, "PNJ", "PNJ HCM", "ban"),
-        "DOJI_AVPL_BAN": _find_item_price(data, "DOJI", "AVPL/SJC", "ban"),
-        "SJC_1L_BAN": _find_item_price(data, "SJC", "SJC 1L", "ban"),
+        "summary_items": summary_items,
     }
     return snapshot
 
@@ -366,6 +424,7 @@ def _save_history(snapshot: Dict[str, Any]) -> None:
     try:
         with open(HISTORY_FILE, "w", encoding="utf-8") as f:
             json.dump(snapshot, f, ensure_ascii=False, indent=2)
+        print("Đã lưu history vào", HISTORY_FILE)
     except Exception as exc:
         print(f"Không lưu được history: {exc}")
 
@@ -373,7 +432,7 @@ def _save_history(snapshot: Dict[str, Any]) -> None:
 def _format_change(current: Optional[int], previous: Optional[int]) -> str:
     """
     current, previous: giá VNĐ (int)
-    Trả về câu kiểu:
+    Trả về câu:
     '▲ tăng 300.000 VNĐ (+0,20%) so với 153.300.000 VNĐ lần trước'
     """
     if current is None or previous is None or previous == 0:
@@ -409,18 +468,88 @@ def _format_change(current: Optional[int], previous: Optional[int]) -> str:
     )
 
 
-def _append_quick_summary(lines: List[str], data: Dict[str, Any]) -> None:
-    pnj_hcm = _find_item_price(data, "PNJ", "PNJ HCM", "ban")
-    doji_avpl = _find_item_price(data, "DOJI", "AVPL/SJC", "ban")
-    sjc_1l = _find_item_price(data, "SJC", "SJC 1L", "ban")
+def _get_brand_summary(
+    data: Dict[str, Any],
+    history: Dict[str, Any],
+    brand_key: str,
+) -> Optional[Dict[str, Any]]:
+    """
+    Lấy thông tin tóm tắt cho 1 brand:
+    {
+      "brand": "PNJ",
+      "name": "tên dòng",
+      "current_price": 153600000,
+      "previous_price": 153300000 hoặc None
+    }
+    """
+    brand_data = data.get(brand_key) or {}
+    history_items = (history or {}).get("summary_items", {})
+    prev_entry = history_items.get(brand_key)
 
+    curr_name: Optional[str] = None
+    curr_price: Optional[int] = None
+    prev_price: Optional[int] = None
+
+    if prev_entry and prev_entry.get("name"):
+        # Đã từng có history -> cố gắng lấy đúng cùng dòng
+        prev_name = prev_entry["name"]
+        prev_price = prev_entry.get("ban")
+
+        if prev_name in brand_data:
+            curr_price = _normalize_price_to_vnd(
+                brand_data[prev_name].get("ban")
+            )
+            curr_name = prev_name
+        else:
+            # không tìm thấy tên y hệt, thử contains
+            for loai, info in brand_data.items():
+                if prev_name.lower() in loai.lower():
+                    curr_price = _normalize_price_to_vnd(info.get("ban"))
+                    curr_name = loai
+                    break
+
+        # nếu vẫn không lấy được thì chọn lại dòng đại diện mới
+        if curr_price is None:
+            chosen = _choose_summary_item(brand_key, brand_data)
+            if chosen:
+                curr_name = chosen["name"]
+                curr_price = chosen["ban"]
+    else:
+        # Chưa có history -> chọn dòng đại diện hiện tại
+        chosen = _choose_summary_item(brand_key, brand_data)
+        if chosen:
+            curr_name = chosen["name"]
+            curr_price = chosen["ban"]
+            prev_price = None
+
+    if curr_name is None or curr_price is None:
+        return None
+
+    return {
+        "brand": brand_key,
+        "name": curr_name,
+        "current_price": curr_price,
+        "previous_price": prev_price,
+    }
+
+
+def _append_quick_summary(
+    lines: List[str],
+    data: Dict[str, Any],
+    history: Dict[str, Any],
+) -> None:
     lines.append("📌 Tóm tắt nhanh – Giá BÁN ra (một số dòng chủ lực)")
-    if pnj_hcm is not None:
-        lines.append(f"- PNJ HCM: {_format_vnd_raw(pnj_hcm)}")
-    if doji_avpl is not None:
-        lines.append(f"- DOJI AVPL/SJC: {_format_vnd_raw(doji_avpl)}")
-    if sjc_1l is not None:
-        lines.append(f"- SJC 1L/10L/1KG: {_format_vnd_raw(sjc_1l)}")
+
+    for brand in ("PNJ", "DOJI", "SJC"):
+        info = _get_brand_summary(data, history, brand)
+        if not info:
+            continue
+
+        display_name = info["name"]
+        lines.append(
+            f"- {display_name}: {_format_vnd_raw(info['current_price'])}"
+        )
+
     lines.append("")
 
 
@@ -429,35 +558,29 @@ def _append_change_section(
     data: Dict[str, Any],
     history: Dict[str, Any],
 ) -> None:
-    pnj_curr = _find_item_price(data, "PNJ", "PNJ HCM", "ban")
-    doji_curr = _find_item_price(data, "DOJI", "AVPL/SJC", "ban")
-    sjc_curr = _find_item_price(data, "SJC", "SJC 1L", "ban")
+    lines.append("📈 Diễn biến so với lần cập nhật trước (theo giá BÁN ra)")
 
-    pnj_prev = history.get("PNJ_HCM_BAN")
-    doji_prev = history.get("DOJI_AVPL_BAN")
-    sjc_prev = history.get("SJC_1L_BAN")
+    any_prev = False
+    for brand in ("PNJ", "DOJI", "SJC"):
+        info = _get_brand_summary(data, history, brand)
+        if not info:
+            continue
 
-    lines.append("📈 Diễn biến so với lần cập nhật trước (so sánh theo giá BÁN ra)")
+        curr = info["current_price"]
+        prev = info["previous_price"]
+        if prev is None:
+            continue  # brand này chưa có dữ liệu lịch sử
 
-    if not any([pnj_prev, doji_prev, sjc_prev]):
-        lines.append("- Chưa có dữ liệu so sánh (lần chạy đầu tiên).")
-        lines.append("")
-        return
-
-    if pnj_curr is not None:
+        any_prev = True
+        display_name = info["name"]
         lines.append(
-            f"- PNJ HCM (Bán): {_format_vnd_raw(pnj_curr)} – "
-            f"{_format_change(pnj_curr, pnj_prev)}"
+            f"- {display_name} (Bán): {_format_vnd_raw(curr)} – "
+            f"{_format_change(curr, prev)}"
         )
-    if doji_curr is not None:
+
+    if not any_prev:
         lines.append(
-            f"- DOJI AVPL/SJC (Bán): {_format_vnd_raw(doji_curr)} – "
-            f"{_format_change(doji_curr, doji_prev)}"
-        )
-    if sjc_curr is not None:
-        lines.append(
-            f"- SJC 1L/10L/1KG (Bán): {_format_vnd_raw(sjc_curr)} – "
-            f"{_format_change(sjc_curr, sjc_prev)}"
+            "- Chưa có dữ liệu so sánh (lần chạy đầu tiên hoặc mới đổi nguồn dữ liệu)."
         )
 
     lines.append("")
@@ -467,10 +590,11 @@ def format_gold_message(
     data: Dict[str, Any],
     history: Optional[Dict[str, Any]] = None,
 ) -> str:
+    hist = history or {}
     lines = _format_header()
 
-    _append_quick_summary(lines, data)
-    _append_change_section(lines, data, history or {})
+    _append_quick_summary(lines, data, hist)
+    _append_change_section(lines, data, hist)
     lines.append("────────────────────")
 
     _append_pnj_section(lines, data.get("PNJ"))
