@@ -8,16 +8,22 @@ Chạy trên GitHub Actions, gửi thông báo qua Telegram.
 
 import os
 import time
+import json
 from datetime import datetime, timedelta
-# Import Optional để tương thích với Python < 3.10
-from typing import Any, Dict, Iterable, List, Optional 
+from typing import Any, Dict, Iterable, List, Optional
 
 import pandas as pd
 import requests
-import json
+
+import matplotlib
+matplotlib.use("Agg")  # dùng backend không cần GUI
 import matplotlib.pyplot as plt
 
 HISTORY_FILE = "gold_history.json"
+
+# ==========================
+# 0. HÀM XỬ LÝ GIÁ / ĐỊNH DẠNG
+# ==========================
 
 def _normalize_price_to_vnd(value: Any) -> Optional[int]:
     """
@@ -30,7 +36,7 @@ def _normalize_price_to_vnd(value: Any) -> Optional[int]:
 
     s = str(value)
     # Lấy toàn bộ chữ số trong chuỗi
-    digits = ''.join(ch for ch in s if ch.isdigit())
+    digits = "".join(ch for ch in s if ch.isdigit())
     if not digits:
         return None
 
@@ -46,14 +52,268 @@ def _normalize_price_to_vnd(value: Any) -> Optional[int]:
 
 def _format_vnd_amount(value: Any) -> str:
     """
-    Trả về chuỗi dạng '15.280.000 VNĐ' từ nguồn string gốc.
+    Trả về chuỗi dạng '15.280.000 VNĐ' từ nguồn string/int gốc.
     Nếu không parse được -> trả về chuỗi rỗng.
     """
     amount = _normalize_price_to_vnd(value)
     if amount is None:
         return ""
-    # Format kiểu 15.280.000 VNĐ
+    # 15280000 -> '15,280,000' -> '15.280.000 VNĐ'
     return f"{amount:,}".replace(",", ".") + " VNĐ"
+
+
+# ==========================
+# 1. HÀM LẤY GIÁ TỪ WEB
+# ==========================
+
+def _parse_baomoi_gold_table(url: str, source_name: str) -> Dict[str, Any]:
+    """
+    Đọc bảng 'Loại vàng – Giá mua (VNĐ) – Giá bán (VNĐ)' trên trang tiện ích giá vàng của BaoMoi.
+    Trả về dict: { 'Tên loại vàng': {'mua': '...', 'ban': '...'} }
+    """
+    try:
+        tables = pd.read_html(url, flavor=["lxml", "html5lib"])
+    except Exception as e:
+        raise RuntimeError(f"{source_name}: Lỗi đọc HTML - {e}")
+
+    if not tables:
+        raise RuntimeError(f"{source_name}: Không tìm thấy bảng dữ liệu nào")
+
+    df = tables[0]
+    df.columns = [str(c).strip() for c in df.columns]
+
+    col_map: Dict[str, str] = {}
+    for col in df.columns:
+        lower = str(col).lower()
+        if "loại" in lower and "vàng" in lower:
+            col_map["loai"] = col
+        elif "giá mua" in lower or "mua" in lower:
+            col_map["mua"] = col
+        elif "giá bán" in lower or "bán" in lower:
+            col_map["ban"] = col
+
+    required = ["loai", "mua", "ban"]
+    if not all(k in col_map for k in required):
+        raise RuntimeError(
+            f"{source_name}: Không nhận diện được đủ cột, columns={df.columns}"
+        )
+
+    result: Dict[str, Any] = {}
+    for _, row in df.iterrows():
+        loai = str(row[col_map["loai"]]).strip()
+        if not loai or loai.lower() == "nan":
+            continue
+        result[loai] = {
+            "mua": str(row[col_map["mua"]]).strip(),
+            "ban": str(row[col_map["ban"]]).strip(),
+        }
+    return result
+
+
+def get_pnj_prices() -> Dict[str, Any]:
+    """
+    Lấy giá PNJ từ tiện ích BaoMoi:
+    https://baomoi.com/tien-ich-gia-vang-pnj.epi
+
+    Bảng có thể chứa cả dòng SJC, nên filter các dòng có chữ 'PNJ'.
+    """
+    url = "https://baomoi.com/tien-ich-gia-vang-pnj.epi"
+    raw = _parse_baomoi_gold_table(url, "PNJ (BaoMoi)")
+
+    result: Dict[str, Any] = {}
+    for loai, info in raw.items():
+        name_upper = loai.upper()
+        if "PNJ" not in name_upper:
+            continue
+        result[loai] = {
+            "mua": info["mua"],
+            "ban": info["ban"],
+            "khu_vuc": "",
+        }
+
+    return result
+
+
+def get_doji_prices() -> Dict[str, Any]:
+    """Lấy bảng giá vàng từ DOJI trực tiếp trên https://giavang.doji.vn/."""
+    url = "https://giavang.doji.vn/"
+    try:
+        tables = pd.read_html(url, flavor=["lxml", "html5lib"])
+    except Exception as e:
+        raise RuntimeError(f"DOJI: Lỗi đọc HTML - {e}")
+
+    if not tables:
+        raise RuntimeError("DOJI: Không tìm thấy bảng dữ liệu nào")
+
+    # Duyệt qua tất cả bảng để tìm bảng có cột Loại / Mua / Bán
+    for df in tables:
+        df.columns = [str(c).strip() for c in df.columns]
+        col_map: Dict[str, str] = {}
+
+        for col in df.columns:
+            lower = str(col).lower()
+            if "loại" in lower or "giá vàng trong nước" in lower:
+                col_map["loai"] = col
+            elif "mua" in lower:
+                col_map["mua"] = col
+            elif "bán" in lower:
+                col_map["ban"] = col
+
+        required = ["loai", "mua", "ban"]
+        if all(key in col_map for key in required):
+            result: Dict[str, Any] = {}
+            for _, row in df.iterrows():
+                loai = str(row[col_map["loai"]]).strip()
+                if not loai or loai.lower() == "nan":
+                    continue
+                result[loai] = {
+                    "mua": str(row[col_map["mua"]]).strip(),
+                    "ban": str(row[col_map["ban"]]).strip(),
+                    "khu_vuc": "Trong nước",
+                }
+            return result
+
+    raise RuntimeError(f"DOJI: Đã duyệt {len(tables)} bảng nhưng không khớp cột.")
+
+
+def get_sjc_prices() -> Dict[str, Any]:
+    """
+    Lấy bảng giá vàng SJC từ tiện ích BaoMoi:
+    https://baomoi.com/tien-ich-gia-vang-sjc.epi
+    """
+    url = "https://baomoi.com/tien-ich-gia-vang-sjc.epi"
+    raw = _parse_baomoi_gold_table(url, "SJC (BaoMoi)")
+
+    result: Dict[str, Any] = {}
+    for loai, info in raw.items():
+        result[loai] = {
+            "mua": info["mua"],
+            "ban": info["ban"],
+        }
+
+    return result
+
+
+def get_all_gold_prices() -> Dict[str, Any]:
+    data: Dict[str, Any] = {}
+    errors: List[str] = []
+
+    try:
+        data["PNJ"] = get_pnj_prices()
+    except Exception as exc:
+        errors.append(f"PNJ: {exc}")
+
+    try:
+        data["DOJI"] = get_doji_prices()
+    except Exception as exc:
+        errors.append(f"DOJI: {exc}")
+
+    try:
+        data["SJC"] = get_sjc_prices()
+    except Exception as exc:
+        errors.append(f"SJC: {exc}")
+
+    if errors:
+        data["_errors"] = errors
+
+    return data
+
+
+# ==========================
+# 2. FORMAT NỘI DUNG TIN NHẮN
+# ==========================
+
+def _format_header() -> List[str]:
+    now_utc = datetime.utcnow()
+    now_vn = now_utc + timedelta(hours=7)
+    header_time = now_vn.strftime("%d/%m/%Y %H:%M")
+
+    lines: List[str] = []
+    lines.append("📊 BÁO CÁO GIÁ VÀNG VIỆT NAM (PNJ – DOJI – SJC)")
+    lines.append(f"⏰ Cập nhật: {header_time} (giờ VN)")
+    lines.append("Đơn vị: VNĐ (đã quy đổi nếu nguồn niêm yết nghìn đồng/chỉ)")
+    lines.append("")
+    return lines
+
+
+def _append_pnj_section(lines: List[str], pnj_data: Optional[Dict[str, Any]]) -> None:
+    if pnj_data is None:
+        return
+
+    lines.append("🟡 PNJ")
+    if not pnj_data:
+        lines.append("- Không có dữ liệu.")
+        lines.append("")
+        return
+
+    for loai, info in pnj_data.items():
+        khu_vuc = info.get("khu_vuc") or ""
+        suffix = f" [{khu_vuc}]" if khu_vuc else ""
+
+        mua = _format_vnd_amount(info.get("mua"))
+        ban = _format_vnd_amount(info.get("ban"))
+
+        lines.append(f"- {loai}{suffix}: Mua {mua} | Bán {ban}")
+
+    lines.append("")
+
+
+def _append_doji_section(lines: List[str], doji_data: Optional[Dict[str, Any]]) -> None:
+    if doji_data is None:
+        return
+
+    lines.append("🟠 DOJI (Trong nước)")
+    if not doji_data:
+        lines.append("- Không có dữ liệu.")
+        lines.append("")
+        return
+
+    for loai, info in doji_data.items():
+        # Làm sạch tên: bỏ ' (nghìn/chỉ)' nếu có
+        name_display = (
+            loai.replace("(nghìn/chỉ)", "")
+            .replace("(nghìn/chỉ)", "")
+            .strip()
+        )
+
+        mua = _format_vnd_amount(info.get("mua"))
+        ban = _format_vnd_amount(info.get("ban"))
+        lines.append(f"- {name_display}: Mua {mua} | Bán {ban}")
+
+    lines.append("")
+
+
+def _append_sjc_section(lines: List[str], sjc_data: Optional[Dict[str, Any]]) -> None:
+    if sjc_data is None:
+        return
+
+    lines.append("🔵 SJC")
+    if not sjc_data:
+        lines.append("- Không có dữ liệu.")
+        lines.append("")
+        return
+
+    for loai, info in sjc_data.items():
+        name_display = loai.strip()
+        mua = _format_vnd_amount(info.get("mua"))
+        ban = _format_vnd_amount(info.get("ban"))
+        lines.append(f"- {name_display}: Mua {mua} | Bán {ban}")
+
+    lines.append("")
+
+
+def _append_error_section(lines: List[str], errors: Optional[List[str]]) -> None:
+    if not errors:
+        return
+
+    lines.append("⚠️ Lỗi trong quá trình lấy dữ liệu:")
+    for err in errors:
+        lines.append(f"- {err}")
+
+
+# ==========================
+# 3. HỖ TRỢ PHÂN TÍCH / HISTORY
+# ==========================
 
 def _find_item_price(
     data: Dict[str, Any],
@@ -72,6 +332,7 @@ def _find_item_price(
         if name_contains.lower() in str(loai).lower():
             return _normalize_price_to_vnd(info.get(field))
     return None
+
 
 def _load_history() -> Dict[str, Any]:
     try:
@@ -104,6 +365,8 @@ def _save_history(snapshot: Dict[str, Any]) -> None:
             json.dump(snapshot, f, ensure_ascii=False, indent=2)
     except Exception as exc:
         print(f"Không lưu được history: {exc}")
+
+
 def _format_change(current: Optional[int], previous: Optional[int]) -> str:
     """
     current, previous: giá VNĐ (int)
@@ -127,373 +390,14 @@ def _format_change(current: Optional[int], previous: Optional[int]) -> str:
     diff_str = f"{diff_abs:,}".replace(",", ".") + " VNĐ"
 
     pct = (diff / previous) * 100
-    # hiển thị dấu +/-
     pct_str = f"{pct:+.2f}%".replace(".", ",")
 
     if diff == 0:
         return f"{symbol} {direction} 0 VNĐ ({pct_str})"
     return f"{symbol} {direction} {diff_str} ({pct_str})"
 
-# ==========================
-# 1. HÀM LẤY GIÁ PNJ, DOJI, SJC
-# ==========================
-def _parse_baomoi_gold_table(url: str, source_name: str) -> Dict[str, Any]:
-    """
-    Đọc bảng 'Loại vàng – Giá mua (VNĐ) – Giá bán (VNĐ)' trên trang tiện ích giá vàng của BaoMoi.
-    Trả về dict: { 'Tên loại vàng': {'mua': '...', 'ban': '...'} }
-    """
-    try:
-        tables = pd.read_html(url, flavor=['lxml', 'html5lib'])
-    except Exception as e:
-        raise RuntimeError(f"{source_name}: Lỗi đọc HTML - {e}")
 
-    if not tables:
-        raise RuntimeError(f"{source_name}: Không tìm thấy bảng dữ liệu nào")
-
-    # BaoMoi thường chỉ có 1 bảng chính
-    df = tables[0]
-    df.columns = [str(c).strip() for c in df.columns]
-
-    col_map: Dict[str, str] = {}
-    for col in df.columns:
-        lower = str(col).lower()
-        if "loại" in lower and "vàng" in lower:
-            col_map["loai"] = col
-        elif "giá mua" in lower or "mua" in lower:
-            col_map["mua"] = col
-        elif "giá bán" in lower or "bán" in lower:
-            col_map["ban"] = col
-
-    required = ["loai", "mua", "ban"]
-    if not all(k in col_map for k in required):
-        raise RuntimeError(f"{source_name}: Không nhận diện được đủ cột, columns={df.columns}")
-
-    result: Dict[str, Any] = {}
-    for _, row in df.iterrows():
-        loai = str(row[col_map["loai"]]).strip()
-        if not loai or loai.lower() == "nan":
-            continue
-        result[loai] = {
-            "mua": str(row[col_map["mua"]]).strip(),
-            "ban": str(row[col_map["ban"]]).strip(),
-        }
-    return result
-
-def get_pnj_prices() -> Dict[str, Any]:
-    """
-    Lấy giá PNJ từ tiện ích BaoMoi:
-    https://baomoi.com/tien-ich-gia-vang-pnj.epi
-
-    Trang này có cả dòng PNJ và SJC, nên cần filter giữ lại các loại có chữ 'PNJ'.
-    """
-    url = "https://baomoi.com/tien-ich-gia-vang-pnj.epi"
-    raw = _parse_baomoi_gold_table(url, "PNJ (BaoMoi)")
-
-    result: Dict[str, Any] = {}
-    for loai, info in raw.items():
-        name_upper = loai.upper()
-        # Giữ các dòng thực sự là sản phẩm PNJ
-        if "PNJ" not in name_upper:
-            continue
-        result[loai] = {
-            "mua": info["mua"],
-            "ban": info["ban"],
-            # Không có cột khu vực riêng, để trống
-            "khu_vuc": "",
-        }
-
-    return result
-
-
-
-def get_doji_prices() -> Dict[str, Any]:
-    """Lấy bảng giá vàng từ DOJI."""
-    url = "https://giavang.doji.vn/"
-    try:
-        tables = pd.read_html(url, flavor=['lxml', 'html5lib'])
-    except Exception as e:
-        raise RuntimeError(f"DOJI: Lỗi đọc HTML - {e}")
-
-    if not tables:
-        raise RuntimeError("DOJI: Không tìm thấy bảng dữ liệu nào")
-
-    # SỬA LỖI: Duyệt qua TẤT CẢ các bảng để tìm bảng đúng (tránh bảng quảng cáo/ngoại tệ)
-    for df in tables:
-        df.columns = [str(c).strip() for c in df.columns]
-        col_map: Dict[str, str] = {}
-        
-        for col in df.columns:
-            lower = str(col).lower()
-            if "loại" in lower or "giá vàng trong nước" in lower:
-                col_map["loai"] = col
-            elif "mua" in lower:
-                col_map["mua"] = col
-            elif "bán" in lower:
-                col_map["ban"] = col
-        
-        required = ["loai", "mua", "ban"]
-        # Nếu bảng này đủ cột thì dùng luôn
-        if all(key in col_map for key in required):
-            result: Dict[str, Any] = {}
-            for _, row in df.iterrows():
-                loai = str(row[col_map["loai"]]).strip()
-                if not loai or loai.lower() == "nan":
-                    continue
-                result[loai] = {
-                    "mua": str(row[col_map["mua"]]).strip(),
-                    "ban": str(row[col_map["ban"]]).strip(),
-                    "khu_vuc": "Trong nước",
-                }
-            return result
-
-    raise RuntimeError(f"DOJI: Đã duyệt {len(tables)} bảng nhưng không khớp cột.")
-
-
-def _find_sjc_dataframe(tables: Iterable[pd.DataFrame]) -> pd.DataFrame:
-    for df in tables:
-        cols = [str(c).lower() for c in df.columns]
-        joined = " ".join(cols)
-        has_loai = "loại vàng" in joined or "loại" in joined
-        has_mua_ban = "mua" in joined and "bán" in joined
-        if has_loai and has_mua_ban:
-            return df
-    raise RuntimeError("SJC: Không tìm được bảng giá phù hợp")
-
-
-def _map_sjc_columns(df: pd.DataFrame) -> Dict[str, str]:
-    col_map: Dict[str, str] = {}
-    for col in df.columns:
-        lower = str(col).lower()
-        if "loại" in lower:
-            col_map["loai"] = col
-        elif "mua" in lower:
-            col_map["mua"] = col
-        elif "bán" in lower:
-            col_map["ban"] = col
-
-    required = ["loai", "mua", "ban"]
-    if not all(key in col_map for key in required):
-        raise RuntimeError(f"SJC: Không nhận diện được đủ cột, columns={df.columns}")
-    return col_map
-
-
-def _sjc_rows_to_dict(df: pd.DataFrame, col_map: Dict[str, str]) -> Dict[str, Any]:
-    result: Dict[str, Any] = {}
-    for _, row in df.iterrows():
-        loai = str(row[col_map["loai"]]).strip()
-        if not loai or loai.lower() == "nan":
-            continue
-        result[loai] = {
-            "mua": str(row[col_map["mua"]]).strip(),
-            "ban": str(row[col_map["ban"]]).strip(),
-        }
-    return result
-
-
-def get_sjc_prices() -> Dict[str, Any]:
-    """
-    Lấy bảng giá vàng SJC từ tiện ích BaoMoi:
-    https://baomoi.com/tien-ich-gia-vang-sjc.epi
-
-    Bảng có dạng:
-    Loại vàng | Giá mua (VNĐ) | Giá bán (VNĐ)
-    SJC 1L, 10L, 1KG | 152,800,000 | 154,800,000
-    ...
-    """
-    url = "https://baomoi.com/tien-ich-gia-vang-sjc.epi"
-    raw = _parse_baomoi_gold_table(url, "SJC (BaoMoi)")
-
-    # Ở đây có thể giữ tất cả dòng; nếu bạn chỉ muốn vài loại chính thì lọc thêm.
-    result: Dict[str, Any] = {}
-    for loai, info in raw.items():
-        result[loai] = {
-            "mua": info["mua"],
-            "ban": info["ban"],
-        }
-
-    return result
-
-
-
-def get_all_gold_prices() -> Dict[str, Any]:
-    data: Dict[str, Any] = {}
-    errors: List[str] = []
-
-    try:
-        data["PNJ"] = get_pnj_prices()
-    except Exception as exc:
-        errors.append(f"PNJ: {exc}")
-
-    try:
-        data["DOJI"] = get_doji_prices()
-    except Exception as exc:
-        errors.append(f"DOJI: {exc}")
-
-    try:
-        data["SJC"] = get_sjc_prices()
-    except Exception as exc:
-        errors.append(f"SJC: {exc}")
-
-    if errors:
-        data["_errors"] = errors
-
-    return data
-
-
-# ==========================
-# 2. FORMAT NỘI DUNG TIN NHẮN
-# ==========================
-def generate_current_price_chart(data: Dict[str, Any],
-                                 output_path: str = "gold_chart.png") -> None:
-    """
-    Vẽ biểu đồ cột giá bán hiện tại của 3 dòng chủ lực:
-    PNJ HCM, DOJI AVPL/SJC, SJC 1L/10L/1KG
-    """
-    labels = []
-    values = []
-
-    pnj = _find_item_price(data, "PNJ", "PNJ HCM", "ban")
-    doji = _find_item_price(data, "DOJI", "AVPL/SJC", "ban")
-    sjc = _find_item_price(data, "SJC", "SJC 1L", "ban")
-
-    if pnj is not None:
-        labels.append("PNJ HCM")
-        values.append(pnj)
-    if doji is not None:
-        labels.append("DOJI AVPL/SJC")
-        values.append(doji)
-    if sjc is not None:
-        labels.append("SJC 1L/10L/1KG")
-        values.append(sjc)
-
-    if not labels:
-        return  # không có dữ liệu thì khỏi vẽ
-
-    plt.figure()
-    plt.bar(labels, values)
-    plt.ylabel("Giá bán (VNĐ)")
-    plt.title("So sánh giá bán hiện tại")
-    plt.xticks(rotation=15)
-    plt.tight_layout()
-    plt.savefig(output_path)
-    plt.close()
-
-def send_telegram_photo(path: str, caption: Optional[str] = None) -> None:
-    token = os.environ.get("TELEGRAM_TOKEN")
-    chat_id = os.environ.get("TELEGRAM_CHAT_ID")
-
-    if not token or not chat_id:
-        print("Test mode: Thiếu TELEGRAM_TOKEN hoặc TELEGRAM_CHAT_ID, bỏ qua gửi ảnh.")
-        return
-
-    url = f"https://api.telegram.org/bot{token}/sendPhoto"
-    with open(path, "rb") as img_file:
-        files = {"photo": img_file}
-        data = {"chat_id": chat_id}
-        if caption:
-            data["caption"] = caption
-
-        resp = requests.post(url, data=data, files=files, timeout=60)
-        if not resp.ok:
-            raise RuntimeError(f"Telegram sendPhoto lỗi: {resp.status_code} {resp.text}")
-
-def _format_header() -> List[str]:
-    now_utc = datetime.utcnow()
-    now_vn = now_utc + timedelta(hours=7)
-    header_time = now_vn.strftime("%d/%m/%Y %H:%M")
-
-    lines: List[str] = []
-    lines.append("📊 Báo cáo giá vàng VN (PNJ – DOJI – SJC)")
-    lines.append(f"⏰ Cập nhật: {header_time} (giờ VN)")
-    lines.append("")
-    return lines
-
-# SỬA: Dùng Optional[...] thay vì ... | None
-def _append_pnj_section(lines: List[str], pnj_data: Optional[Dict[str, Any]]) -> None:
-    if pnj_data is None:
-        return
-
-    lines.append("🟡 PNJ")
-    if not pnj_data:
-        lines.append("- Không có dữ liệu.")
-        lines.append("")
-        return
-
-    for loai, info in pnj_data.items():
-        khu_vuc = info.get("khu_vuc") or ""
-        suffix = f" [{khu_vuc}]" if khu_vuc else ""
-
-        # Dùng format VNĐ
-        mua = _format_vnd_amount(info.get("mua"))
-        ban = _format_vnd_amount(info.get("ban"))
-
-        lines.append(f"- {loai}{suffix}: Mua {mua} | Bán {ban}")
-
-    lines.append("")
-
-
-
-def _append_doji_section(lines: List[str], doji_data: Optional[Dict[str, Any]]) -> None:
-    if doji_data is None:
-        return
-
-    lines.append("🟠 DOJI (Trong nước)")
-    if not doji_data:
-        lines.append("- Không có dữ liệu.")
-        lines.append("")
-        return
-
-    for loai, info in doji_data.items():
-        # Làm sạch tên: bỏ '(nghìn/chỉ)' nếu có
-        name_display = (
-            loai.replace("(nghìn/chỉ)", "")
-                .replace("(nghìn/chỉ)", "")
-                .strip()
-        )
-
-        mua = _format_vnd_amount(info.get("mua"))
-        ban = _format_vnd_amount(info.get("ban"))
-        lines.append(f"- {name_display}: Mua {mua} | Bán {ban}")
-
-    lines.append("")
-
-
-
-def _append_sjc_section(lines: List[str], sjc_data: Optional[Dict[str, Any]]) -> None:
-    if sjc_data is None:
-        return
-
-    lines.append("🔵 SJC")
-    if not sjc_data:
-        lines.append("- Không có dữ liệu.")
-        lines.append("")
-        return
-
-    for loai, info in sjc_data.items():
-        name_display = loai.strip()
-        mua = _format_vnd_amount(info.get("mua"))
-        ban = _format_vnd_amount(info.get("ban"))
-        lines.append(f"- {name_display}: Mua {mua} | Bán {ban}")
-
-    lines.append("")
-
-
-
-def _append_error_section(lines: List[str], errors: Optional[List[str]]) -> None:
-    if not errors:
-        return
-
-    lines.append("⚠️ Lỗi trong quá trình lấy dữ liệu:")
-    for err in errors:
-        lines.append(f"- {err}")
-
-
-def format_gold_message(data: Dict[str, Any],
-                        history: Optional[Dict[str, Any]] = None) -> str:
-    lines = _format_header()
-
-    # Thêm tóm tắt nhanh + diễn biến nếu có history
-    def _append_quick_summary(lines: List[str], data: Dict[str, Any]) -> None:
+def _append_quick_summary(lines: List[str], data: Dict[str, Any]) -> None:
     pnj_hcm = _find_item_price(data, "PNJ", "PNJ HCM", "ban")
     doji_avpl = _find_item_price(data, "DOJI", "AVPL/SJC", "ban")
     sjc_1l = _find_item_price(data, "SJC", "SJC 1L", "ban")
@@ -508,9 +412,11 @@ def format_gold_message(data: Dict[str, Any],
     lines.append("")
 
 
-def _append_change_section(lines: List[str],
-                           data: Dict[str, Any],
-                           history: Dict[str, Any]) -> None:
+def _append_change_section(
+    lines: List[str],
+    data: Dict[str, Any],
+    history: Dict[str, Any],
+) -> None:
     pnj_curr = _find_item_price(data, "PNJ", "PNJ HCM", "ban")
     doji_curr = _find_item_price(data, "DOJI", "AVPL/SJC", "ban")
     sjc_curr = _find_item_price(data, "SJC", "SJC 1L", "ban")
@@ -544,6 +450,17 @@ def _append_change_section(lines: List[str],
 
     lines.append("")
 
+
+def format_gold_message(
+    data: Dict[str, Any],
+    history: Optional[Dict[str, Any]] = None,
+) -> str:
+    lines = _format_header()
+
+    _append_quick_summary(lines, data)
+    _append_change_section(lines, data, history or {})
+    lines.append("────────────────────")
+
     _append_pnj_section(lines, data.get("PNJ"))
     _append_doji_section(lines, data.get("DOJI"))
     _append_sjc_section(lines, data.get("SJC"))
@@ -551,9 +468,8 @@ def _append_change_section(lines: List[str],
     return "\n".join(lines)
 
 
-
 # ==========================
-# 3. GỬI TELEGRAM
+# 4. GỬI TELEGRAM + BIỂU ĐỒ
 # ==========================
 
 def send_telegram_message(text: str) -> None:
@@ -564,7 +480,7 @@ def send_telegram_message(text: str) -> None:
         print("Test mode: Không tìm thấy TELEGRAM_TOKEN, in message ra log:")
         print(text)
         return
-        
+
     if not chat_id:
         raise RuntimeError("Thiếu TELEGRAM_CHAT_ID (env)")
 
@@ -576,28 +492,103 @@ def send_telegram_message(text: str) -> None:
         raise RuntimeError(f"Telegram API lỗi: {resp.status_code} {resp.text}")
 
 
+def send_telegram_photo(path: str, caption: Optional[str] = None) -> None:
+    token = os.environ.get("TELEGRAM_TOKEN")
+    chat_id = os.environ.get("TELEGRAM_CHAT_ID")
+
+    if not token or not chat_id:
+        print(
+            "Test mode: Thiếu TELEGRAM_TOKEN hoặc TELEGRAM_CHAT_ID, "
+            "bỏ qua gửi ảnh."
+        )
+        return
+
+    if not os.path.exists(path):
+        print(f"Không tìm thấy file ảnh để gửi: {path}")
+        return
+
+    url = f"https://api.telegram.org/bot{token}/sendPhoto"
+    with open(path, "rb") as img_file:
+        files = {"photo": img_file}
+        data = {"chat_id": chat_id}
+        if caption:
+            data["caption"] = caption
+
+        resp = requests.post(url, data=data, files=files, timeout=60)
+        if not resp.ok:
+            raise RuntimeError(
+                f"Telegram sendPhoto lỗi: {resp.status_code} {resp.text}"
+            )
+
+
+def generate_current_price_chart(
+    data: Dict[str, Any],
+    output_path: str = "gold_chart.png",
+) -> None:
+    """
+    Vẽ biểu đồ cột giá bán hiện tại của 3 dòng chủ lực:
+    PNJ HCM, DOJI AVPL/SJC, SJC 1L/10L/1KG
+    """
+    labels: List[str] = []
+    values: List[int] = []
+
+    pnj = _find_item_price(data, "PNJ", "PNJ HCM", "ban")
+    doji = _find_item_price(data, "DOJI", "AVPL/SJC", "ban")
+    sjc = _find_item_price(data, "SJC", "SJC 1L", "ban")
+
+    if pnj is not None:
+        labels.append("PNJ HCM")
+        values.append(pnj)
+    if doji is not None:
+        labels.append("DOJI AVPL/SJC")
+        values.append(doji)
+    if sjc is not None:
+        labels.append("SJC 1L/10L/1KG")
+        values.append(sjc)
+
+    if not labels:
+        print("Không có dữ liệu để vẽ biểu đồ.")
+        return
+
+    plt.figure()
+    plt.bar(labels, values)
+    plt.ylabel("Giá bán (VNĐ)")
+    plt.title("So sánh giá bán hiện tại")
+    plt.xticks(rotation=15)
+    plt.tight_layout()
+    plt.savefig(output_path)
+    plt.close()
+
+
 # ==========================
-# 4. MAIN
+# 5. MAIN
 # ==========================
 
 def main() -> None:
+    data: Optional[Dict[str, Any]] = None
+
     try:
         prev_history = _load_history()
         data = get_all_gold_prices()
         message = format_gold_message(data, prev_history)
-        # Xây snapshot mới và lưu lại
         new_history = _build_history_snapshot(data)
         _save_history(new_history)
     except Exception as exc:
         message = f"⚠️ Gold Bot: lỗi nghiêm trọng – {exc}"
-    try:
-        generate_current_price_chart(data)
-        send_telegram_photo("gold_chart.png", caption="Biểu đồ so sánh giá bán hiện tại")
-    except Exception as exc:
-        print(f"Không gửi được biểu đồ: {exc}")
 
+    # Gửi message text
     send_telegram_message(message)
 
+    # Nếu có dữ liệu thì vẽ biểu đồ và gửi ảnh
+    if data is not None:
+        try:
+            generate_current_price_chart(data)
+            send_telegram_photo(
+                "gold_chart.png",
+                caption="Biểu đồ so sánh giá bán hiện tại",
+            )
+        except Exception as exc:
+            print(f"Không gửi được biểu đồ: {exc}")
 
 
 if __name__ == "__main__":
