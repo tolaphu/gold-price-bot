@@ -8,14 +8,16 @@ Chạy trên GitHub Actions, gửi thông báo qua Telegram.
 
 import os
 import json
+from pathlib import Path
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 
 import pandas as pd
 import requests
 
-HISTORY_FILE = "gold_history.json"
-
+# Thư mục chứa file bot_gold_price.py
+BASE_DIR = Path(__file__).resolve().parent
+HISTORY_PATH = BASE_DIR / "gold_history.json"
 
 # ==========================
 # 0. XỬ LÝ GIÁ / ĐỊNH DẠNG
@@ -309,23 +311,6 @@ def _append_error_section(lines: List[str], errors: Optional[List[str]]) -> None
 # 3. PHÂN TÍCH / HISTORY
 # ==========================
 
-def _find_item_price(
-    data: Dict[str, Any],
-    brand_key: str,
-    name_contains: str,
-    field: str = "ban",
-) -> Optional[int]:
-    """
-    Tìm giá (mua/bán) của 1 sản phẩm trong 1 thương hiệu, trả về VNĐ (int),
-    tìm theo 'chứa chuỗi' (case-insensitive).
-    """
-    brand_data = data.get(brand_key) or {}
-    for loai, info in brand_data.items():
-        if name_contains.lower() in str(loai).lower():
-            return _normalize_price_to_vnd(info.get(field))
-    return None
-
-
 def _choose_summary_item(
     brand_key: str,
     brand_data: Dict[str, Any],
@@ -341,11 +326,9 @@ def _choose_summary_item(
     if not keys:
         return None
 
-    # Heuristic riêng cho từng brand
     chosen_name: Optional[str] = None
 
     if brand_key == "PNJ":
-        # Ưu tiên dòng có HCM / TP.HCM
         candidates = [
             k for k in keys
             if "hcm" in k.lower() or "tp.hcm" in k.lower() or "tp hcm" in k.lower()
@@ -355,7 +338,6 @@ def _choose_summary_item(
         chosen_name = (candidates or keys)[0]
 
     elif brand_key == "DOJI":
-        # Ưu tiên dòng có AVPL/SJC hoặc SJC
         candidates = [
             k for k in keys
             if "avpl" in k.lower() or "sjc" in k.lower()
@@ -363,7 +345,6 @@ def _choose_summary_item(
         chosen_name = (candidates or keys)[0]
 
     elif brand_key == "SJC":
-        # Ưu tiên dòng có 1L, 10L, 1KG
         candidates = [
             k for k in keys
             if "1l" in k.lower() or "1kg" in k.lower() or "10l" in k.lower()
@@ -383,19 +364,21 @@ def _choose_summary_item(
 
 def _load_history() -> Dict[str, Any]:
     try:
-        with open(HISTORY_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except FileNotFoundError:
-        return {}
+        if not HISTORY_PATH.exists():
+            print("[DEBUG] HISTORY_FILE chưa tồn tại, coi như lần đầu.")
+            return {}
+        with HISTORY_PATH.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+            print("[DEBUG] Đọc history từ", HISTORY_PATH)
+            return data
     except Exception as exc:
-        print(f"Không đọc được history: {exc}")
+        print(f"[DEBUG] Không đọc được history: {exc}")
         return {}
 
 
 def _build_history_snapshot(data: Dict[str, Any]) -> Dict[str, Any]:
     """
     Lưu lại các dòng đại diện (giá BÁN ra) để so sánh ở lần sau.
-    Cấu trúc:
     {
       "_timestamp_utc": "...",
       "summary_items": {
@@ -422,19 +405,14 @@ def _build_history_snapshot(data: Dict[str, Any]) -> Dict[str, Any]:
 
 def _save_history(snapshot: Dict[str, Any]) -> None:
     try:
-        with open(HISTORY_FILE, "w", encoding="utf-8") as f:
+        with HISTORY_PATH.open("w", encoding="utf-8") as f:
             json.dump(snapshot, f, ensure_ascii=False, indent=2)
-        print("Đã lưu history vào", HISTORY_FILE)
+        print("[DEBUG] Đã lưu history vào", HISTORY_PATH)
     except Exception as exc:
-        print(f"Không lưu được history: {exc}")
+        print(f"[DEBUG] Không lưu được history: {exc}")
 
 
 def _format_change(current: Optional[int], previous: Optional[int]) -> str:
-    """
-    current, previous: giá VNĐ (int)
-    Trả về câu:
-    '▲ tăng 300.000 VNĐ (+0,20%) so với 153.300.000 VNĐ lần trước'
-    """
     if current is None or previous is None or previous == 0:
         return "không có dữ liệu so sánh (lần chạy đầu hoặc thiếu history)"
 
@@ -457,10 +435,7 @@ def _format_change(current: Optional[int], previous: Optional[int]) -> str:
     pct_str = f"{pct:+.2f}%".replace(".", ",")
 
     if diff == 0:
-        return (
-            f"{symbol} {direction}, không thay đổi so với {prev_str} "
-            f"({pct_str})"
-        )
+        return f"{symbol} {direction}, không thay đổi so với {prev_str} ({pct_str})"
 
     return (
         f"{symbol} {direction} {diff_str} ({pct_str}) "
@@ -473,15 +448,6 @@ def _get_brand_summary(
     history: Dict[str, Any],
     brand_key: str,
 ) -> Optional[Dict[str, Any]]:
-    """
-    Lấy thông tin tóm tắt cho 1 brand:
-    {
-      "brand": "PNJ",
-      "name": "tên dòng",
-      "current_price": 153600000,
-      "previous_price": 153300000 hoặc None
-    }
-    """
     brand_data = data.get(brand_key) or {}
     history_items = (history or {}).get("summary_items", {})
     prev_entry = history_items.get(brand_key)
@@ -491,7 +457,6 @@ def _get_brand_summary(
     prev_price: Optional[int] = None
 
     if prev_entry and prev_entry.get("name"):
-        # Đã từng có history -> cố gắng lấy đúng cùng dòng
         prev_name = prev_entry["name"]
         prev_price = prev_entry.get("ban")
 
@@ -501,21 +466,18 @@ def _get_brand_summary(
             )
             curr_name = prev_name
         else:
-            # không tìm thấy tên y hệt, thử contains
             for loai, info in brand_data.items():
                 if prev_name.lower() in loai.lower():
                     curr_price = _normalize_price_to_vnd(info.get("ban"))
                     curr_name = loai
                     break
 
-        # nếu vẫn không lấy được thì chọn lại dòng đại diện mới
         if curr_price is None:
             chosen = _choose_summary_item(brand_key, brand_data)
             if chosen:
                 curr_name = chosen["name"]
                 curr_price = chosen["ban"]
     else:
-        # Chưa có history -> chọn dòng đại diện hiện tại
         chosen = _choose_summary_item(brand_key, brand_data)
         if chosen:
             curr_name = chosen["name"]
@@ -569,7 +531,7 @@ def _append_change_section(
         curr = info["current_price"]
         prev = info["previous_price"]
         if prev is None:
-            continue  # brand này chưa có dữ liệu lịch sử
+            continue
 
         any_prev = True
         display_name = info["name"]
@@ -633,6 +595,10 @@ def send_telegram_message(text: str) -> None:
 # ==========================
 
 def main() -> None:
+    print("[DEBUG] CWD:", os.getcwd())
+    print("[DEBUG] BASE_DIR:", BASE_DIR)
+    print("[DEBUG] HISTORY_PATH:", HISTORY_PATH)
+
     data: Optional[Dict[str, Any]] = None
 
     try:
