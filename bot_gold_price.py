@@ -7,22 +7,18 @@ Chạy trên GitHub Actions, gửi thông báo qua Telegram.
 """
 
 import os
-import time
 import json
 from datetime import datetime, timedelta
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, List, Optional
 
 import pandas as pd
 import requests
 
-import matplotlib
-matplotlib.use("Agg")  # dùng backend không cần GUI
-import matplotlib.pyplot as plt
-
 HISTORY_FILE = "gold_history.json"
 
+
 # ==========================
-# 0. HÀM XỬ LÝ GIÁ / ĐỊNH DẠNG
+# 0. XỬ LÝ GIÁ / ĐỊNH DẠNG
 # ==========================
 
 def _normalize_price_to_vnd(value: Any) -> Optional[int]:
@@ -35,7 +31,6 @@ def _normalize_price_to_vnd(value: Any) -> Optional[int]:
         return None
 
     s = str(value)
-    # Lấy toàn bộ chữ số trong chuỗi
     digits = "".join(ch for ch in s if ch.isdigit())
     if not digits:
         return None
@@ -50,20 +45,26 @@ def _normalize_price_to_vnd(value: Any) -> Optional[int]:
     return amount
 
 
+def _format_vnd_raw(amount: int) -> str:
+    """
+    Định dạng số VNĐ (int) thành 'xx.xxx.xxx VNĐ' (không nhân thêm).
+    """
+    return f"{amount:,}".replace(",", ".") + " VNĐ"
+
+
 def _format_vnd_amount(value: Any) -> str:
     """
-    Trả về chuỗi dạng '15.280.000 VNĐ' từ nguồn string/int gốc.
-    Nếu không parse được -> trả về chuỗi rỗng.
+    Dùng cho dữ liệu lấy trực tiếp từ web (có thể đang là 'nghìn').
+    Tự quy đổi về VNĐ rồi định dạng 'xx.xxx.xxx VNĐ'.
     """
     amount = _normalize_price_to_vnd(value)
     if amount is None:
         return ""
-    # 15280000 -> '15,280,000' -> '15.280.000 VNĐ'
-    return f"{amount:,}".replace(",", ".") + " VNĐ"
+    return _format_vnd_raw(amount)
 
 
 # ==========================
-# 1. HÀM LẤY GIÁ TỪ WEB
+# 1. LẤY GIÁ TỪ WEB
 # ==========================
 
 def _parse_baomoi_gold_table(url: str, source_name: str) -> Dict[str, Any]:
@@ -135,7 +136,10 @@ def get_pnj_prices() -> Dict[str, Any]:
 
 
 def get_doji_prices() -> Dict[str, Any]:
-    """Lấy bảng giá vàng từ DOJI trực tiếp trên https://giavang.doji.vn/."""
+    """
+    Lấy bảng giá vàng từ DOJI trực tiếp trên https://giavang.doji.vn/.
+    Chỉ lấy bảng có đủ 3 cột: Loại / Mua / Bán.
+    """
     url = "https://giavang.doji.vn/"
     try:
         tables = pd.read_html(url, flavor=["lxml", "html5lib"])
@@ -145,7 +149,6 @@ def get_doji_prices() -> Dict[str, Any]:
     if not tables:
         raise RuntimeError("DOJI: Không tìm thấy bảng dữ liệu nào")
 
-    # Duyệt qua tất cả bảng để tìm bảng có cột Loại / Mua / Bán
     for df in tables:
         df.columns = [str(c).strip() for c in df.columns]
         col_map: Dict[str, str] = {}
@@ -312,7 +315,7 @@ def _append_error_section(lines: List[str], errors: Optional[List[str]]) -> None
 
 
 # ==========================
-# 3. HỖ TRỢ PHÂN TÍCH / HISTORY
+# 3. PHÂN TÍCH / HISTORY
 # ==========================
 
 def _find_item_price(
@@ -348,7 +351,7 @@ def _load_history() -> Dict[str, Any]:
 def _build_history_snapshot(data: Dict[str, Any]) -> Dict[str, Any]:
     """
     Lưu lại một số giá 'key' để so sánh ở lần sau.
-    Lưu giá bán (ban) dưới dạng VNĐ (int).
+    Lưu giá BÁN ra (ban) dưới dạng VNĐ (int).
     """
     snapshot: Dict[str, Any] = {
         "_timestamp_utc": datetime.utcnow().isoformat(),
@@ -370,10 +373,11 @@ def _save_history(snapshot: Dict[str, Any]) -> None:
 def _format_change(current: Optional[int], previous: Optional[int]) -> str:
     """
     current, previous: giá VNĐ (int)
-    Trả về câu kiểu: '▲ tăng 300.000 VNĐ (+0,20%)'
+    Trả về câu kiểu:
+    '▲ tăng 300.000 VNĐ (+0,20%) so với 153.300.000 VNĐ lần trước'
     """
     if current is None or previous is None or previous == 0:
-        return "không có dữ liệu so sánh"
+        return "không có dữ liệu so sánh (lần chạy đầu hoặc thiếu history)"
 
     diff = current - previous
     if diff > 0:
@@ -387,14 +391,22 @@ def _format_change(current: Optional[int], previous: Optional[int]) -> str:
         symbol = "▶"
 
     diff_abs = abs(diff)
-    diff_str = f"{diff_abs:,}".replace(",", ".") + " VNĐ"
+    diff_str = _format_vnd_raw(diff_abs)
+    prev_str = _format_vnd_raw(previous)
 
     pct = (diff / previous) * 100
     pct_str = f"{pct:+.2f}%".replace(".", ",")
 
     if diff == 0:
-        return f"{symbol} {direction} 0 VNĐ ({pct_str})"
-    return f"{symbol} {direction} {diff_str} ({pct_str})"
+        return (
+            f"{symbol} {direction}, không thay đổi so với {prev_str} "
+            f"({pct_str})"
+        )
+
+    return (
+        f"{symbol} {direction} {diff_str} ({pct_str}) "
+        f"so với {prev_str} lần trước"
+    )
 
 
 def _append_quick_summary(lines: List[str], data: Dict[str, Any]) -> None:
@@ -402,13 +414,13 @@ def _append_quick_summary(lines: List[str], data: Dict[str, Any]) -> None:
     doji_avpl = _find_item_price(data, "DOJI", "AVPL/SJC", "ban")
     sjc_1l = _find_item_price(data, "SJC", "SJC 1L", "ban")
 
-    lines.append("📌 Tóm tắt nhanh – Giá bán")
+    lines.append("📌 Tóm tắt nhanh – Giá BÁN ra (một số dòng chủ lực)")
     if pnj_hcm is not None:
-        lines.append(f"- PNJ HCM: {_format_vnd_amount(pnj_hcm)}")
+        lines.append(f"- PNJ HCM: {_format_vnd_raw(pnj_hcm)}")
     if doji_avpl is not None:
-        lines.append(f"- DOJI AVPL/SJC: {_format_vnd_amount(doji_avpl)}")
+        lines.append(f"- DOJI AVPL/SJC: {_format_vnd_raw(doji_avpl)}")
     if sjc_1l is not None:
-        lines.append(f"- SJC 1L/10L/1KG: {_format_vnd_amount(sjc_1l)}")
+        lines.append(f"- SJC 1L/10L/1KG: {_format_vnd_raw(sjc_1l)}")
     lines.append("")
 
 
@@ -425,7 +437,7 @@ def _append_change_section(
     doji_prev = history.get("DOJI_AVPL_BAN")
     sjc_prev = history.get("SJC_1L_BAN")
 
-    lines.append("📈 Diễn biến so với lần cập nhật trước")
+    lines.append("📈 Diễn biến so với lần cập nhật trước (so sánh theo giá BÁN ra)")
 
     if not any([pnj_prev, doji_prev, sjc_prev]):
         lines.append("- Chưa có dữ liệu so sánh (lần chạy đầu tiên).")
@@ -434,17 +446,17 @@ def _append_change_section(
 
     if pnj_curr is not None:
         lines.append(
-            f"- PNJ HCM (Bán): {_format_vnd_amount(pnj_curr)} – "
+            f"- PNJ HCM (Bán): {_format_vnd_raw(pnj_curr)} – "
             f"{_format_change(pnj_curr, pnj_prev)}"
         )
     if doji_curr is not None:
         lines.append(
-            f"- DOJI AVPL/SJC (Bán): {_format_vnd_amount(doji_curr)} – "
+            f"- DOJI AVPL/SJC (Bán): {_format_vnd_raw(doji_curr)} – "
             f"{_format_change(doji_curr, doji_prev)}"
         )
     if sjc_curr is not None:
         lines.append(
-            f"- SJC 1L/10L/1KG (Bán): {_format_vnd_amount(sjc_curr)} – "
+            f"- SJC 1L/10L/1KG (Bán): {_format_vnd_raw(sjc_curr)} – "
             f"{_format_change(sjc_curr, sjc_prev)}"
         )
 
@@ -469,7 +481,7 @@ def format_gold_message(
 
 
 # ==========================
-# 4. GỬI TELEGRAM + BIỂU ĐỒ
+# 4. GỬI TELEGRAM
 # ==========================
 
 def send_telegram_message(text: str) -> None:
@@ -492,74 +504,6 @@ def send_telegram_message(text: str) -> None:
         raise RuntimeError(f"Telegram API lỗi: {resp.status_code} {resp.text}")
 
 
-def send_telegram_photo(path: str, caption: Optional[str] = None) -> None:
-    token = os.environ.get("TELEGRAM_TOKEN")
-    chat_id = os.environ.get("TELEGRAM_CHAT_ID")
-
-    if not token or not chat_id:
-        print(
-            "Test mode: Thiếu TELEGRAM_TOKEN hoặc TELEGRAM_CHAT_ID, "
-            "bỏ qua gửi ảnh."
-        )
-        return
-
-    if not os.path.exists(path):
-        print(f"Không tìm thấy file ảnh để gửi: {path}")
-        return
-
-    url = f"https://api.telegram.org/bot{token}/sendPhoto"
-    with open(path, "rb") as img_file:
-        files = {"photo": img_file}
-        data = {"chat_id": chat_id}
-        if caption:
-            data["caption"] = caption
-
-        resp = requests.post(url, data=data, files=files, timeout=60)
-        if not resp.ok:
-            raise RuntimeError(
-                f"Telegram sendPhoto lỗi: {resp.status_code} {resp.text}"
-            )
-
-
-def generate_current_price_chart(
-    data: Dict[str, Any],
-    output_path: str = "gold_chart.png",
-) -> None:
-    """
-    Vẽ biểu đồ cột giá bán hiện tại của 3 dòng chủ lực:
-    PNJ HCM, DOJI AVPL/SJC, SJC 1L/10L/1KG
-    """
-    labels: List[str] = []
-    values: List[int] = []
-
-    pnj = _find_item_price(data, "PNJ", "PNJ HCM", "ban")
-    doji = _find_item_price(data, "DOJI", "AVPL/SJC", "ban")
-    sjc = _find_item_price(data, "SJC", "SJC 1L", "ban")
-
-    if pnj is not None:
-        labels.append("PNJ HCM")
-        values.append(pnj)
-    if doji is not None:
-        labels.append("DOJI AVPL/SJC")
-        values.append(doji)
-    if sjc is not None:
-        labels.append("SJC 1L/10L/1KG")
-        values.append(sjc)
-
-    if not labels:
-        print("Không có dữ liệu để vẽ biểu đồ.")
-        return
-
-    plt.figure()
-    plt.bar(labels, values)
-    plt.ylabel("Giá bán (VNĐ)")
-    plt.title("So sánh giá bán hiện tại")
-    plt.xticks(rotation=15)
-    plt.tight_layout()
-    plt.savefig(output_path)
-    plt.close()
-
-
 # ==========================
 # 5. MAIN
 # ==========================
@@ -576,19 +520,7 @@ def main() -> None:
     except Exception as exc:
         message = f"⚠️ Gold Bot: lỗi nghiêm trọng – {exc}"
 
-    # Gửi message text
     send_telegram_message(message)
-
-    # Nếu có dữ liệu thì vẽ biểu đồ và gửi ảnh
-    if data is not None:
-        try:
-            generate_current_price_chart(data)
-            send_telegram_photo(
-                "gold_chart.png",
-                caption="Biểu đồ so sánh giá bán hiện tại",
-            )
-        except Exception as exc:
-            print(f"Không gửi được biểu đồ: {exc}")
 
 
 if __name__ == "__main__":
