@@ -4,7 +4,6 @@ permissions:
   contents: write   # Cho phép workflow được quyền push file history lên repo
 
 on:
-  # 1) Mỗi lần push lên nhánh main -> bot chạy ngay
   push:
     branches:
       - main
@@ -13,10 +12,8 @@ on:
       - "requirements.txt"
       - ".github/workflows/gold_price.yml"
 
-  # 2) Cho phép bấm nút "Run workflow" trên GitHub Actions
   workflow_dispatch:
 
-  # 3) Cron tự động 08:00 và 18:00 giờ Việt Nam (UTC+7)
   schedule:
     - cron: "0 1 * * *"   # 01:00 UTC = 08:00 VN
     - cron: "0 11 * * *"  # 11:00 UTC = 18:00 VN
@@ -29,8 +26,8 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0            # cần để commit/push
-          persist-credentials: true # dùng GITHUB_TOKEN sẵn để push
+          fetch-depth: 0
+          persist-credentials: true
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -64,8 +61,6 @@ jobs:
             git config user.name "github-actions[bot]"
             git config user.email "github-actions[bot]@users.noreply.github.com"
             git add gold_history.json
-
-            # Chỉ commit nếu thực sự có thay đổi
             if ! git diff --cached --quiet; then
               git commit -m "Update gold price history"
               git push
