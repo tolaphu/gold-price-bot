@@ -54,37 +54,36 @@ def _format_vnd_amount(value: Any) -> str:
 # ==========================
 # 1. HÀM LẤY GIÁ PNJ, DOJI, SJC
 # ==========================
-
-def get_pnj_prices() -> Dict[str, Any]:
-    """Lấy bảng giá vàng từ PNJ."""
-    url = "https://giavang.pnj.com.vn/"
+def _parse_baomoi_gold_table(url: str, source_name: str) -> Dict[str, Any]:
+    """
+    Đọc bảng 'Loại vàng – Giá mua (VNĐ) – Giá bán (VNĐ)' trên trang tiện ích giá vàng của BaoMoi.
+    Trả về dict: { 'Tên loại vàng': {'mua': '...', 'ban': '...'} }
+    """
     try:
-        # Thêm flavor để tránh lỗi thiếu thư viện parse
         tables = pd.read_html(url, flavor=['lxml', 'html5lib'])
     except Exception as e:
-        raise RuntimeError(f"PNJ: Lỗi đọc HTML - {e}")
+        raise RuntimeError(f"{source_name}: Lỗi đọc HTML - {e}")
 
     if not tables:
-        raise RuntimeError("PNJ: Không tìm thấy bảng dữ liệu nào")
+        raise RuntimeError(f"{source_name}: Không tìm thấy bảng dữ liệu nào")
 
+    # BaoMoi thường chỉ có 1 bảng chính
     df = tables[0]
     df.columns = [str(c).strip() for c in df.columns]
 
     col_map: Dict[str, str] = {}
     for col in df.columns:
         lower = str(col).lower()
-        if "khu" in lower and "vực" in lower:
-            col_map["khu_vuc"] = col
-        elif ("loại" in lower and "vàng" in lower) or "sản phẩm" in lower:
+        if "loại" in lower and "vàng" in lower:
             col_map["loai"] = col
-        elif "mua" in lower:
+        elif "giá mua" in lower or "mua" in lower:
             col_map["mua"] = col
-        elif "bán" in lower:
+        elif "giá bán" in lower or "bán" in lower:
             col_map["ban"] = col
 
-    required = ["khu_vuc", "loai", "mua", "ban"]
-    if not all(key in col_map for key in required):
-        raise RuntimeError(f"PNJ: Không nhận diện được đủ cột, columns={df.columns}")
+    required = ["loai", "mua", "ban"]
+    if not all(k in col_map for k in required):
+        raise RuntimeError(f"{source_name}: Không nhận diện được đủ cột, columns={df.columns}")
 
     result: Dict[str, Any] = {}
     for _, row in df.iterrows():
@@ -94,10 +93,34 @@ def get_pnj_prices() -> Dict[str, Any]:
         result[loai] = {
             "mua": str(row[col_map["mua"]]).strip(),
             "ban": str(row[col_map["ban"]]).strip(),
-            "khu_vuc": str(row[col_map["khu_vuc"]]).strip(),
+        }
+    return result
+
+def get_pnj_prices() -> Dict[str, Any]:
+    """
+    Lấy giá PNJ từ tiện ích BaoMoi:
+    https://baomoi.com/tien-ich-gia-vang-pnj.epi
+
+    Trang này có cả dòng PNJ và SJC, nên cần filter giữ lại các loại có chữ 'PNJ'.
+    """
+    url = "https://baomoi.com/tien-ich-gia-vang-pnj.epi"
+    raw = _parse_baomoi_gold_table(url, "PNJ (BaoMoi)")
+
+    result: Dict[str, Any] = {}
+    for loai, info in raw.items():
+        name_upper = loai.upper()
+        # Giữ các dòng thực sự là sản phẩm PNJ
+        if "PNJ" not in name_upper:
+            continue
+        result[loai] = {
+            "mua": info["mua"],
+            "ban": info["ban"],
+            # Không có cột khu vực riêng, để trống
+            "khu_vuc": "",
         }
 
     return result
+
 
 
 def get_doji_prices() -> Dict[str, Any]:
@@ -185,45 +208,27 @@ def _sjc_rows_to_dict(df: pd.DataFrame, col_map: Dict[str, str]) -> Dict[str, An
 
 
 def get_sjc_prices() -> Dict[str, Any]:
-    """Lấy bảng giá vàng SJC từ website sjc.com.vn (URL mới)."""
-    # URL mới của SJC, có bảng Loại vàng / Mua / Bán
-    url = "https://sjc.com.vn/gia-vang-online"
+    """
+    Lấy bảng giá vàng SJC từ tiện ích BaoMoi:
+    https://baomoi.com/tien-ich-gia-vang-sjc.epi
 
-    headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/120.0.0.0 Safari/537.36"
-        ),
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,"
-                  "image/avif,image/webp,*/*;q=0.8",
-        "Referer": "https://sjc.com.vn/",
-    }
+    Bảng có dạng:
+    Loại vàng | Giá mua (VNĐ) | Giá bán (VNĐ)
+    SJC 1L, 10L, 1KG | 152,800,000 | 154,800,000
+    ...
+    """
+    url = "https://baomoi.com/tien-ich-gia-vang-sjc.epi"
+    raw = _parse_baomoi_gold_table(url, "SJC (BaoMoi)")
 
-    last_exc: Optional[Exception] = None
-    tables = None
+    # Ở đây có thể giữ tất cả dòng; nếu bạn chỉ muốn vài loại chính thì lọc thêm.
+    result: Dict[str, Any] = {}
+    for loai, info in raw.items():
+        result[loai] = {
+            "mua": info["mua"],
+            "ban": info["ban"],
+        }
 
-    for _ in range(3):  # Thử 3 lần
-        try:
-            resp = requests.get(url, headers=headers, timeout=30)
-            resp.raise_for_status()
-            # Fix encoding
-            resp.encoding = resp.apparent_encoding
-            tables = pd.read_html(resp.text)
-            break
-        except Exception as exc:
-            last_exc = exc
-            time.sleep(2)
-
-    if not tables:
-        raise RuntimeError(f"SJC: Lỗi kết nối hoặc không tìm thấy bảng - {last_exc}")
-
-    # Tận dụng lại hàm lọc bảng & map cột bạn đã có
-    df_raw = _find_sjc_dataframe(tables)
-    df_raw.columns = [str(c).strip() for c in df_raw.columns]
-
-    col_map = _map_sjc_columns(df_raw)
-    return _sjc_rows_to_dict(df_raw, col_map)
+    return result
 
 
 
