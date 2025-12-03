@@ -43,3 +43,17 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
           python bot_gold_price.py
+
+      - name: Commit history file
+        if: always()
+        run: |
+          if [ -f gold_history.json ]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git add gold_history.json
+            # Chỉ commit nếu có thay đổi
+            if ! git diff --cached --quiet; then
+              git commit -m "Update gold price history"
+              git push
+            fi
+          fi
