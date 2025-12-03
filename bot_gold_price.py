@@ -15,6 +15,7 @@ from typing import Any, Dict, Iterable, List, Optional
 import pandas as pd
 import requests
 import json
+import matplotlib.pyplot as plt
 
 HISTORY_FILE = "gold_history.json"
 
@@ -342,6 +343,59 @@ def get_all_gold_prices() -> Dict[str, Any]:
 # ==========================
 # 2. FORMAT NỘI DUNG TIN NHẮN
 # ==========================
+def generate_current_price_chart(data: Dict[str, Any],
+                                 output_path: str = "gold_chart.png") -> None:
+    """
+    Vẽ biểu đồ cột giá bán hiện tại của 3 dòng chủ lực:
+    PNJ HCM, DOJI AVPL/SJC, SJC 1L/10L/1KG
+    """
+    labels = []
+    values = []
+
+    pnj = _find_item_price(data, "PNJ", "PNJ HCM", "ban")
+    doji = _find_item_price(data, "DOJI", "AVPL/SJC", "ban")
+    sjc = _find_item_price(data, "SJC", "SJC 1L", "ban")
+
+    if pnj is not None:
+        labels.append("PNJ HCM")
+        values.append(pnj)
+    if doji is not None:
+        labels.append("DOJI AVPL/SJC")
+        values.append(doji)
+    if sjc is not None:
+        labels.append("SJC 1L/10L/1KG")
+        values.append(sjc)
+
+    if not labels:
+        return  # không có dữ liệu thì khỏi vẽ
+
+    plt.figure()
+    plt.bar(labels, values)
+    plt.ylabel("Giá bán (VNĐ)")
+    plt.title("So sánh giá bán hiện tại")
+    plt.xticks(rotation=15)
+    plt.tight_layout()
+    plt.savefig(output_path)
+    plt.close()
+
+def send_telegram_photo(path: str, caption: Optional[str] = None) -> None:
+    token = os.environ.get("TELEGRAM_TOKEN")
+    chat_id = os.environ.get("TELEGRAM_CHAT_ID")
+
+    if not token or not chat_id:
+        print("Test mode: Thiếu TELEGRAM_TOKEN hoặc TELEGRAM_CHAT_ID, bỏ qua gửi ảnh.")
+        return
+
+    url = f"https://api.telegram.org/bot{token}/sendPhoto"
+    with open(path, "rb") as img_file:
+        files = {"photo": img_file}
+        data = {"chat_id": chat_id}
+        if caption:
+            data["caption"] = caption
+
+        resp = requests.post(url, data=data, files=files, timeout=60)
+        if not resp.ok:
+            raise RuntimeError(f"Telegram sendPhoto lỗi: {resp.status_code} {resp.text}")
 
 def _format_header() -> List[str]:
     now_utc = datetime.utcnow()
@@ -536,6 +590,11 @@ def main() -> None:
         _save_history(new_history)
     except Exception as exc:
         message = f"⚠️ Gold Bot: lỗi nghiêm trọng – {exc}"
+    try:
+        generate_current_price_chart(data)
+        send_telegram_photo("gold_chart.png", caption="Biểu đồ so sánh giá bán hiện tại")
+    except Exception as exc:
+        print(f"Không gửi được biểu đồ: {exc}")
 
     send_telegram_message(message)
 
