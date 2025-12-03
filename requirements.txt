@@ -5,3 +5,4 @@ html5lib
 beautifulsoup4
 pytest
 flake8
+matplotlib
