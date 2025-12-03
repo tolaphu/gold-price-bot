@@ -1,11 +1,21 @@
 name: Gold Price Bot
 
 on:
-  schedule:
-    # Chạy tự động lúc 09:00 sáng VN hàng ngày
-    - cron: "0 2 * * *"
-  # Dòng này cho phép bấm nút "Run workflow" để chạy NGAY LẬP TỨC
+  # 1) Mỗi lần push lên nhánh main -> bot chạy ngay
+  push:
+    branches:
+      - main          # nếu nhánh chính của bạn là master thì sửa lại
+    paths:
+      - "bot_gold_price.py"
+      - "requirements.txt"
+      - ".github/workflows/gold_price.yml"
+
+  # 2) Cho phép bấm nút "Run workflow" trên GitHub Actions
   workflow_dispatch:
+
+  # 3) Cron tự động 09:00 sáng VN (02:00 UTC)
+  # schedule:
+  #  - cron: "0 2 * * *"
 
 jobs:
   run-bot:
@@ -19,14 +29,12 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-          cache: 'pip' # Tăng tốc độ cài đặt cho các lần sau
+          cache: 'pip'
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          # Cài các thư viện từ file requirements.txt
           pip install -r requirements.txt
-          # Cài thêm thư viện bổ trợ xử lý HTML cho pandas (quan trọng)
           pip install html5lib lxml
 
       - name: Run Gold Bot
