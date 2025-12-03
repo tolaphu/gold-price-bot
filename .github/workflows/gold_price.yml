@@ -24,12 +24,13 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          persist-credentials: true  # rất quan trọng để push lại được
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-          cache: 'pip'
 
       - name: Install dependencies
         run: |
@@ -51,7 +52,6 @@ jobs:
             git config user.name "github-actions[bot]"
             git config user.email "github-actions[bot]@users.noreply.github.com"
             git add gold_history.json
-            # Chỉ commit nếu có thay đổi
             if ! git diff --cached --quiet; then
               git commit -m "Update gold price history"
               git push
