@@ -13,9 +13,10 @@ on:
   # 2) Cho phép bấm nút "Run workflow" trên GitHub Actions
   workflow_dispatch:
 
-  # 3) Cron tự động 09:00 sáng VN (02:00 UTC)
-  # schedule:
-  #  - cron: "0 2 * * *"
+  # 3) Cron tự động 08:00 và 18:00 giờ Việt Nam (UTC+7)
+  schedule:
+    - cron: "0 1 * * *"   # 01:00 UTC  = 08:00 VN
+    - cron: "0 11 * * *"  # 11:00 UTC  = 18:00 VN
 
 jobs:
   run-bot:
